@@ -1,5 +1,6 @@
 import { type App, PluginSettingTab, Setting } from "obsidian";
 import type LivePresencePlugin from "./main";
+import { colorFromName } from "./utils";
 
 export class LivePresenceSettingTab extends PluginSettingTab {
   constructor(
@@ -12,6 +13,8 @@ export class LivePresenceSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+
+    new Setting(containerEl).setName("Identität").setHeading();
 
     new Setting(containerEl)
       .setName("Anzeigename")
@@ -27,17 +30,18 @@ export class LivePresenceSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Farbe (optional)")
-      .setDesc("Feste Farbe als hsl(...) oder #hex. Leer = automatisch aus dem Namen.")
-      .addText((t) =>
-        t
-          .setPlaceholder("automatisch")
-          .setValue(this.plugin.settings.color)
+      .setName("Farbe")
+      .setDesc("Deine Cursor-Farbe. Vorbelegt anhand deines Namens.")
+      .addColorPicker((cp) =>
+        cp
+          .setValue(this.plugin.settings.color || colorFromName(this.plugin.settings.userName || "Anonym"))
           .onChange(async (v) => {
-            this.plugin.settings.color = v.trim();
+            this.plugin.settings.color = v;
             await this.plugin.saveSettings();
           }),
       );
+
+    new Setting(containerEl).setName("Verbindung").setHeading();
 
     new Setting(containerEl)
       .setName("Server-URL")
@@ -79,12 +83,15 @@ export class LivePresenceSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Neu verbinden")
-      .setDesc("Übernimmt Name, Login und Server sofort und verbindet neu.")
+      .setName("Anmelden")
+      .setDesc("Mit den obigen Daten verbinden und die Verbindung testen. Das Ergebnis erscheint als Hinweis.")
       .addButton((b) =>
-        b.setButtonText("Neu verbinden").onClick(() => {
-          this.plugin.reconnect();
-        }),
+        b
+          .setButtonText("Anmelden / Verbindung testen")
+          .setCta()
+          .onClick(() => {
+            this.plugin.reconnect();
+          }),
       );
   }
 }
