@@ -295,7 +295,8 @@ export default class LivePresencePlugin extends Plugin {
     this.updateStatusBar();
     this.refreshRemoteCursors();
     for (const leaf of this.app.workspace.getLeavesOfType(ROSTER_VIEW_TYPE)) {
-      (leaf.view as RosterView).refresh();
+      // Sidebar views can be deferred (Obsidian 1.7+); only refresh a real roster view.
+      if (leaf.view instanceof RosterView) leaf.view.refresh();
     }
     this.evaluateCoedit();
   }

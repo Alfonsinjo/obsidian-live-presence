@@ -114,7 +114,9 @@ export class CollabBinding {
       // If both are empty there is nothing to reconcile.
       if (this.gen !== gen || this.destroyed(view)) return;
 
-      text.observe(() => this.log(`shared text changed, len=${text.length}`));
+      text.observe((e) =>
+        this.log(`shared text changed len=${text.length} ${e.transaction.local ? "(local)" : "(REMOTE)"}`),
+      );
 
       const ext = yCollab(text, provider.awareness, { undoManager: false });
       view.dispatch({
