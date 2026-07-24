@@ -1,0 +1,22 @@
+{
+  "name": "live-presence",
+  "version": "0.1.0",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs production"
+  },
+  "dependencies": {
+    "y-protocols": "^1.0.6",
+    "y-websocket": "^2.0.4",
+    "yjs": "^13.6.0"
+  },
+  "devDependencies": {
+    "@codemirror/state": "^6.0.0",
+    "@codemirror/view": "^6.0.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "latest",
+    "tslib": "^2.7.0",
+    "typescript": "^5.5.0"
+  }
+}

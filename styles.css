@@ -1,0 +1,65 @@
+/* Remote-Cursor (Caret) anderer Nutzer im Editor */
+.lp-remote-caret {
+  position: relative;
+  border-left: 2px solid var(--lp-color, #888);
+  margin-left: -1px;
+  pointer-events: auto;
+}
+/* Wider, invisible hover zone so the thin caret is easy to hover for the name. */
+.lp-remote-caret::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  right: -3px;
+}
+.lp-remote-caret .lp-remote-label {
+  position: absolute;
+  top: -1.15em;
+  left: -2px;
+  font-size: 0.7em;
+  line-height: 1;
+  white-space: nowrap;
+  padding: 1px 4px;
+  border-radius: 3px 3px 3px 0;
+  color: #fff;
+  background: var(--lp-color, #888);
+  opacity: 0;
+  transition: opacity 0.1s;
+  z-index: 30;
+}
+.lp-remote-caret:hover .lp-remote-label,
+.lp-remote-caret.lp-show-label .lp-remote-label {
+  opacity: 1;
+}
+
+/* Presence-Roster (Seitenleiste) */
+.lp-roster { padding: 8px 10px; }
+.lp-roster h4 { margin: 4px 0 8px; }
+.lp-roster-file {
+  margin: 6px 0 2px;
+  font-weight: 600;
+  font-size: 0.85em;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.lp-roster-file:hover { color: var(--text-normal); text-decoration: underline; }
+.lp-roster-file.lp-nofile { font-style: italic; cursor: default; }
+.lp-roster-user {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 2px 8px;
+  font-size: 0.9em;
+}
+.lp-roster-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  flex: 0 0 auto;
+}
+.lp-roster-user.lp-self { opacity: 0.75; }
+.lp-roster-empty { color: var(--text-muted); font-style: italic; padding: 8px 0; }
+
+/* Statusleiste */
+.lp-statusbar { cursor: pointer; }
+.lp-statusbar .lp-roster-dot { display: inline-block; margin-right: 4px; vertical-align: middle; }
