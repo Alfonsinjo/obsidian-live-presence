@@ -10,6 +10,8 @@ export interface LivePresenceSettings {
   authPass: string;
   // Real-time co-editing (shared text). Off by default; presence and cursors work without it.
   enableCoedit: boolean;
+  // Experimental: distribute the whole vault through the relay (replacement for external sync).
+  enableVaultSync: boolean;
 }
 
 export const DEFAULT_SETTINGS: LivePresenceSettings = {
@@ -19,6 +21,7 @@ export const DEFAULT_SETTINGS: LivePresenceSettings = {
   authUser: "",
   authPass: "",
   enableCoedit: true,
+  enableVaultSync: false,
 };
 
 // Cursor/selection as absolute character offsets.

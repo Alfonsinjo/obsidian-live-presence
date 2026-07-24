@@ -7,6 +7,7 @@ import { fetchProfileName, saveProfileName } from "./profile";
 import { type RemoteCursor, remoteCursorsField, setRemoteCursors } from "./remote-cursors";
 import { ROSTER_VIEW_TYPE, RosterView } from "./roster-view";
 import { LivePresenceSettingTab } from "./settings";
+import { VaultSync } from "./sync/vault-sync";
 import { DEFAULT_SETTINGS, type LivePresenceSettings } from "./types";
 import { colorFromName, debounce } from "./utils";
 
@@ -19,6 +20,7 @@ export default class LivePresencePlugin extends Plugin {
   settings!: LivePresenceSettings;
   presence!: PresenceConnection;
   private binding = new CollabBinding();
+  private vaultSync: VaultSync | null = null;
   private coeditEngageTimer: number | null = null;
   private coeditDisengageTimer: number | null = null;
   private statusBarEl!: HTMLElement;
@@ -102,6 +104,7 @@ export default class LivePresencePlugin extends Plugin {
   }
 
   onunload(): void {
+    this.vaultSync?.stop();
     void this.binding.disengage();
     this.presence?.destroy();
   }
@@ -227,6 +230,22 @@ export default class LivePresencePlugin extends Plugin {
 
     this.presence.connect();
     this.updateActiveContext();
+    this.restartVaultSync();
+  }
+
+  // Start (or restart) whole-vault synchronisation when it is enabled.
+  private restartVaultSync(): void {
+    this.vaultSync?.stop();
+    this.vaultSync = null;
+    if (!this.settings.enableVaultSync || !this.settings.serverUrl || !this.settings.authUser) return;
+    this.vaultSync = new VaultSync(
+      this.app,
+      this.settings.serverUrl,
+      this.effectiveAuth(),
+      (path) => this.binding.isActive(path),
+      (...args) => console.log("[VaultSync]", ...args),
+    );
+    void this.vaultSync.start();
   }
 
   private async resolveDisplayName(): Promise<string> {

@@ -110,6 +110,22 @@ export class LivePresenceSettingTab extends PluginSettingTab {
         }),
       );
 
+    new Setting(containerEl).setName("Vault-Synchronisation (experimentell)").setHeading();
+
+    new Setting(containerEl)
+      .setName("Ganzen Vault über den Relay synchronisieren")
+      .setDesc(
+        "Verteilt alle Markdown-Notizen über den eigenen Server (Ersatz für externe Synchronisation). " +
+          "Experimentell: nur mit Testdaten verwenden. Nach dem Umschalten Obsidian neu laden.",
+      )
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.enableVaultSync).onChange(async (v) => {
+          this.plugin.settings.enableVaultSync = v;
+          await this.plugin.saveSettings();
+          this.plugin.reconnect();
+        }),
+      );
+
     new Setting(containerEl)
       .setName("Anmelden")
       .setDesc("Mit den obigen Daten verbinden und die Verbindung testen. Das Ergebnis erscheint als Hinweis.")
