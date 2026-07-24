@@ -134,9 +134,6 @@ export default class LivePresencePlugin extends Plugin {
     }
 
     const participants = this.presence.getAll().filter((e) => e.state.file === file).length;
-    console.log(
-      `[LivePresence] evaluate: file=${file} participants=${participants} active=${this.binding.isActive(file)}`,
-    );
 
     if (participants >= 2) {
       if (this.coeditDisengageTimer !== null) {
