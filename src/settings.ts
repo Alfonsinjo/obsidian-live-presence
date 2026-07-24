@@ -18,15 +18,17 @@ export class LivePresenceSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Anzeigename")
-      .setDesc("Vor- und Nachname. Erscheint im Roster und an deinem Cursor bei den anderen.")
-      .addText((t) =>
-        t
-          .setPlaceholder("Vorname Nachname")
-          .setValue(this.plugin.settings.userName)
-          .onChange(async (v) => {
-            this.plugin.settings.userName = v.trim();
-            await this.plugin.saveSettings();
-          }),
+      .setDesc(
+        "Dein Vor- und Nachname. Wird beim ersten Verbinden abgefragt und im Konto (Server) gespeichert; erscheint im Roster und am Cursor.",
+      )
+      .addText((t) => {
+        t.setValue(this.plugin.settings.userName || "").setDisabled(true);
+      })
+      .addButton((b) =>
+        b.setButtonText("Namen ändern").onClick(async () => {
+          await this.plugin.changeName();
+          this.display();
+        }),
       );
 
     new Setting(containerEl)
@@ -69,6 +71,7 @@ export class LivePresenceSettingTab extends PluginSettingTab {
           }),
       );
 
+    let passwordInput: HTMLInputElement | null = null;
     new Setting(containerEl)
       .setName("Login-Passwort")
       .setDesc("Passwort dieses Kontos. Wird nur zum Verbinden an den Server gesendet.")
@@ -80,7 +83,16 @@ export class LivePresenceSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
         t.inputEl.type = "password";
-      });
+        passwordInput = t.inputEl;
+      })
+      .addToggle((tg) =>
+        tg
+          .setTooltip("Passwort anzeigen")
+          .setValue(false)
+          .onChange((show) => {
+            if (passwordInput) passwordInput.type = show ? "text" : "password";
+          }),
+      );
 
     new Setting(containerEl)
       .setName("Anmelden")

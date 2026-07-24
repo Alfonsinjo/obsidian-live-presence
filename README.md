@@ -20,21 +20,16 @@ Live Presence adds the missing awareness layer, consisting of a live roster and 
 
 ## Features
 
-Phase 1 (this release):
-
 * Automatic connection when the vault is opened. No session needs to be started manually.
-* A presence roster, consisting of a status bar indicator and a sidebar panel that lists everyone currently online, grouped by the note they are in. Selecting a note opens it.
-* Live cursors and selections of other people inside the note that is currently open, each shown in a distinct colour with a name label.
-* Awareness only. The plugin exchanges presence and cursor information exclusively and never transfers file contents, so it coexists with any file synchronisation plugin.
+* A presence roster: a status bar indicator and a sidebar panel that lists everyone currently online, grouped by the note they are in. Selecting a note opens it.
+* Live cursors and selections of other people inside the note you have open, each in a distinct colour with a name label.
+* Real-time co-editing: when two or more people open the same note, editing becomes character by character in real time, with correct remote cursors based on CRDT relative positions. It starts and stops automatically as people join and leave the note.
 
-Co-editing (experimental):
-
-* The command "Co-editing for the current file on/off" binds the open note to a shared Yjs document, so text is edited character by character in real time with correct remote cursors. It is manual for now: engage it on the same note on each side.
-* While a note is co-edited, pause your file-sync plugin for it. Automatic engagement when two or more people open the same file, and automatic coordination with the file-sync plugin, are planned.
+Presence and cursors are exchanged as metadata and never touch your files. During co-editing the note is edited through a shared CRDT (Yjs), so the plugin runs alongside a file-sync plugin (Self-hosted LiveSync, Syncthing, Git), which keeps the note stored and backed up as usual.
 
 ## How it works
 
-Each client connects to a shared Yjs relay (y-websocket) and publishes its awareness state, which consists of name, colour, active file, and cursor position. Every other client receives this state and renders the roster and the remote cursors. The relay only forwards messages. It stores nothing between sessions, and in Phase 1 it never carries document text. Because you host the relay yourself, all data remains within your own infrastructure.
+Each client connects to a shared Yjs relay (y-websocket) and publishes its awareness state, which consists of name, colour, active file, and cursor position. Every other client receives this state and renders the roster and the remote cursors. The relay only forwards messages and stores nothing between sessions: for presence it carries awareness, and for a note being co-edited it carries that note's shared text while the session lasts. Because you host the relay yourself, all data stays within your own infrastructure.
 
 ## Requirements
 
@@ -112,7 +107,7 @@ This produces `main.js`. For a release, attach `main.js`, `manifest.json`, and `
 ## Compatibility
 
 * Obsidian 1.5.0 or newer, desktop only. The plugin uses the CodeMirror 6 editor API and is therefore not available on mobile.
-* Runs alongside file synchronisation plugins such as Self-hosted LiveSync, Syncthing, or Git. In Phase 1 it never writes files.
+* Runs alongside file-sync plugins such as Self-hosted LiveSync, Syncthing, or Git.
 
 ## License
 

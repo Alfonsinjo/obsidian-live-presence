@@ -1,7 +1,9 @@
 import { EditorView } from "@codemirror/view";
 import { MarkdownView, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
 import { CollabBinding } from "./collab/binding";
+import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
+import { fetchProfileName, saveProfileName } from "./profile";
 import { type RemoteCursor, remoteCursorsField, setRemoteCursors } from "./remote-cursors";
 import { ROSTER_VIEW_TYPE, RosterView } from "./roster-view";
 import { LivePresenceSettingTab } from "./settings";
@@ -17,9 +19,13 @@ export default class LivePresencePlugin extends Plugin {
   settings!: LivePresenceSettings;
   presence!: PresenceConnection;
   private binding = new CollabBinding();
+  private coeditEngageTimer: number | null = null;
+  private coeditDisengageTimer: number | null = null;
   private statusBarEl!: HTMLElement;
   // CodeMirror view of the file that currently has focus; used for cursor reporting.
   private activeCm: EditorView | null = null;
+  // Full name resolved from the profile database.
+  private displayName = "";
 
   private reportCursor = debounce((anchor: number, head: number, docLen: number) => {
     this.presence?.setCursor({ anchor, head, docLen });
@@ -68,21 +74,9 @@ export default class LivePresencePlugin extends Plugin {
       name: "Roster öffnen (wer ist gerade im Vault)",
       callback: () => this.activateRoster(),
     });
-    this.addCommand({
-      id: "lp-toggle-coedit",
-      name: "Co-Editing für aktuelle Datei ein/aus (experimentell)",
-      callback: () => {
-        void this.toggleCoedit();
-      },
-    });
 
     this.app.workspace.onLayoutReady(() => {
-      if (!this.settings.serverUrl) {
-        new Notice("Live Presence: Bitte die Server-URL in den Einstellungen eintragen.");
-        return;
-      }
-      this.presence.connect();
-      this.updateActiveContext();
+      void this.startPresence(false);
     });
 
     this.registerEvent(this.app.workspace.on("file-open", () => this.updateActiveContext()));
@@ -102,40 +96,146 @@ export default class LivePresencePlugin extends Plugin {
     this.presence?.destroy();
   }
 
-  private async toggleCoedit(): Promise<void> {
+  // Start co-editing automatically when two or more people share the active file,
+  // and stop shortly after fewer than two remain (grace period against tab switches).
+  private evaluateCoedit(): void {
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     const cm = view ? getCmView(view) : undefined;
     const file = view?.file?.path ?? null;
-    if (!view || !cm || !file) {
-      new Notice("Live Presence: Keine Markdown-Datei aktiv.");
-      return;
+    if (!this.settings.serverUrl || !file || !cm) return;
+
+    const participants = this.presence.getAll().filter((e) => e.state.file === file).length;
+
+    if (participants >= 2) {
+      if (this.coeditDisengageTimer !== null) {
+        window.clearTimeout(this.coeditDisengageTimer);
+        this.coeditDisengageTimer = null;
+      }
+      if (!this.binding.isActive(file) && this.coeditEngageTimer === null) {
+        this.coeditEngageTimer = window.setTimeout(() => {
+          this.coeditEngageTimer = null;
+          const v = this.app.workspace.getActiveViewOfType(MarkdownView);
+          const c = v ? getCmView(v) : undefined;
+          const f = v?.file?.path ?? null;
+          if (
+            f === file &&
+            c &&
+            !this.binding.isActive(f) &&
+            this.presence.getAll().filter((e) => e.state.file === f).length >= 2
+          ) {
+            void this.binding.engage(
+              c,
+              f,
+              this.settings.serverUrl,
+              this.effectiveAuth(),
+              this.effectiveUser(),
+            );
+          }
+        }, 500);
+      }
+    } else if (this.binding.isActive(file) && this.coeditDisengageTimer === null) {
+      this.coeditDisengageTimer = window.setTimeout(() => {
+        this.coeditDisengageTimer = null;
+        const p = this.binding.path;
+        if (p && this.presence.getAll().filter((e) => e.state.file === p).length < 2) {
+          void this.binding.disengage();
+        }
+      }, 5000);
     }
-    if (this.binding.isActive(file)) {
-      await this.binding.disengage();
-      new Notice("Live Presence: Co-Editing beendet.");
-      return;
-    }
-    if (!this.settings.serverUrl) {
-      new Notice("Live Presence: Bitte die Server-URL in den Einstellungen eintragen.");
-      return;
-    }
-    await this.binding.engage(
-      cm,
-      file,
-      this.settings.serverUrl,
-      this.effectiveAuth(),
-      this.effectiveUser(),
-    );
   }
 
   private effectiveUser(): { name: string; color: string } {
-    const name = this.settings.userName || "Anonym";
+    const name = this.displayName || this.settings.userName || "Anonym";
     const color = this.settings.color || colorFromName(name);
     return { name, color };
   }
 
   private effectiveAuth(): { user: string; pass: string } {
     return { user: this.settings.authUser, pass: this.settings.authPass };
+  }
+
+  // Connect to the presence server. Resolves the display name from the profile
+  // database first (asking for it once if it is not set yet).
+  private async startPresence(withToast: boolean): Promise<void> {
+    this.presence?.destroy();
+    if (!this.settings.serverUrl) {
+      new Notice("Live Presence: Bitte die Server-URL in den Einstellungen eintragen.");
+      return;
+    }
+    this.displayName = await this.resolveDisplayName();
+    this.presence = new PresenceConnection(
+      this.settings.serverUrl,
+      this.effectiveUser(),
+      this.effectiveAuth(),
+    );
+    this.presence.onChange(() => this.onPresenceChange());
+
+    if (withToast) {
+      new Notice("Live Presence: Verbinde …");
+      let settled = false;
+      const timer = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        new Notice(
+          "Live Presence: Verbindung fehlgeschlagen (Zeitüberschreitung). Server-URL, Login und Netzwerk prüfen.",
+        );
+      }, 8000);
+      this.presence.onStatus((status) => {
+        if (settled) return;
+        if (status === "connected") {
+          settled = true;
+          window.clearTimeout(timer);
+          new Notice("Live Presence: Verbunden.");
+        } else if (status === "error") {
+          settled = true;
+          window.clearTimeout(timer);
+          new Notice(
+            "Live Presence: Verbindung fehlgeschlagen. Login (Benutzer/Passwort), Server-URL und Netzwerk prüfen.",
+          );
+        }
+      });
+    }
+
+    this.presence.connect();
+    this.updateActiveContext();
+  }
+
+  private async resolveDisplayName(): Promise<string> {
+    const { serverUrl, authUser, authPass } = this.settings;
+    if (!serverUrl || !authUser || !authPass) {
+      return this.settings.userName || "Anonym";
+    }
+    let name = await fetchProfileName(serverUrl, authUser, authPass);
+    if (!name) {
+      name = await this.promptName(this.settings.userName || "");
+      if (name) {
+        await saveProfileName(serverUrl, authUser, authPass, name);
+        this.settings.userName = name;
+        await this.saveData(this.settings);
+      }
+    }
+    return name || this.settings.userName || "Anonym";
+  }
+
+  private promptName(initial: string): Promise<string> {
+    return new Promise((resolve) => {
+      new NameModal(this.app, initial, (name) => resolve(name)).open();
+    });
+  }
+
+  // Change the stored full name (from settings).
+  async changeName(): Promise<void> {
+    const { serverUrl, authUser, authPass } = this.settings;
+    const name = await this.promptName(this.displayName || this.settings.userName || "");
+    if (!name) return;
+    this.displayName = name;
+    this.settings.userName = name;
+    await this.saveData(this.settings);
+    if (serverUrl && authUser && authPass) {
+      await saveProfileName(serverUrl, authUser, authPass, name);
+    }
+    this.presence?.setUser(this.effectiveUser());
+    new Notice(`Live Presence: Name gesetzt: ${name}`);
   }
 
   // Track the active file + editor and publish them.
@@ -159,6 +259,7 @@ export default class LivePresencePlugin extends Plugin {
       this.presence.setCursor(null);
     }
     this.refreshRemoteCursors();
+    this.evaluateCoedit();
   }
 
   private onPresenceChange(): void {
@@ -167,6 +268,7 @@ export default class LivePresencePlugin extends Plugin {
     for (const leaf of this.app.workspace.getLeavesOfType(ROSTER_VIEW_TYPE)) {
       (leaf.view as RosterView).refresh();
     }
+    this.evaluateCoedit();
   }
 
   private updateStatusBar(): void {
@@ -222,45 +324,7 @@ export default class LivePresencePlugin extends Plugin {
   }
 
   reconnect(): void {
-    this.presence?.destroy();
-    if (!this.settings.serverUrl) {
-      new Notice("Live Presence: Bitte die Server-URL in den Einstellungen eintragen.");
-      return;
-    }
-    this.presence = new PresenceConnection(
-      this.settings.serverUrl,
-      this.effectiveUser(),
-      this.effectiveAuth(),
-    );
-    this.presence.onChange(() => this.onPresenceChange());
-
-    // Give the user immediate feedback on the connection attempt.
-    new Notice("Live Presence: Verbinde …");
-    let settled = false;
-    const timer = window.setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      new Notice(
-        "Live Presence: Verbindung fehlgeschlagen (Zeitüberschreitung). Server-URL, Login und Netzwerk prüfen.",
-      );
-    }, 8000);
-    this.presence.onStatus((status) => {
-      if (settled) return;
-      if (status === "connected") {
-        settled = true;
-        window.clearTimeout(timer);
-        new Notice("Live Presence: Verbunden.");
-      } else if (status === "error") {
-        settled = true;
-        window.clearTimeout(timer);
-        new Notice(
-          "Live Presence: Verbindung fehlgeschlagen. Login (Benutzer/Passwort), Server-URL und Netzwerk prüfen.",
-        );
-      }
-    });
-
-    this.presence.connect();
-    this.updateActiveContext();
+    void this.startPresence(true);
   }
 
   async loadSettings(): Promise<void> {
