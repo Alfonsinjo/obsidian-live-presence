@@ -58,6 +58,10 @@ export class VaultSync {
   private eventRefs: EventRef[] = [];
   private leafRef: EventRef | null = null;
   private running = false;
+  // Persistent connection to the document of the currently open non-CodeMirror
+  // text file (e.g. Excalidraw), so its changes propagate live instead of via the
+  // slower index/pull path.
+  private live: { path: string; doc: Y.Doc; provider: WebsocketProvider } | null = null;
 
   // Last content hash we wrote or read per path, to break disk<->store feedback loops.
   private localHashes = new Map<string, string>();
@@ -107,7 +111,11 @@ export class VaultSync {
         if (f instanceof TFile) void this.onLocalRename(f, oldPath);
       }),
     );
-    this.leafRef = this.app.workspace.on("active-leaf-change", () => this.flushPending());
+    this.leafRef = this.app.workspace.on("active-leaf-change", () => {
+      this.flushPending();
+      void this.syncLiveDoc();
+    });
+    void this.syncLiveDoc();
     this.log("vault sync running");
   }
 
@@ -121,6 +129,7 @@ export class VaultSync {
     }
     this.pendingWrites.clear();
     this.pushers.clear();
+    this.teardownLive();
     if (this.indexProvider) {
       this.indexProvider.destroy();
       this.indexProvider = null;
@@ -201,6 +210,15 @@ export class VaultSync {
     const h = await this.localHash(file);
     if (this.localHashes.get(path) === h) return; // unchanged, or our own write
     this.localHashes.set(path, h);
+    // If this file is the live-connected one, publish straight through its open
+    // document for immediate delivery, and record it in the index for closed peers.
+    if (this.live && this.live.path === path && this.kindOf(path) === "t") {
+      const content = normalizeLineEndings(await this.app.vault.read(file));
+      applyMinimalYTextUpdate(this.live.doc, this.live.doc.getText("content"), content);
+      this.files?.set(path, { k: "t", h, t: Date.now() });
+      this.log(`live-pushed ${path} (${content.length} chars)`);
+      return;
+    }
     await this.push(path, h);
   }
 
@@ -378,6 +396,68 @@ export class VaultSync {
     this.localHashes.set(file.path, h);
     await this.push(file.path, h);
     this.log(`renamed ${oldPath} -> ${file.path}`);
+  }
+
+  // Path of the active file when it is a text file shown in a non-CodeMirror view
+  // (Excalidraw and similar). Those cannot use the co-editing binding, so we keep a
+  // live document connection for them instead.
+  private activeLiveTextPath(): string | null {
+    const view = this.app.workspace.activeLeaf?.view as unknown as {
+      getViewType?: () => string;
+      file?: TFile;
+    };
+    const path = view?.file?.path;
+    const type = view?.getViewType?.();
+    if (path && type && type !== "markdown" && this.kindOf(path) === "t") return path;
+    return null;
+  }
+
+  private teardownLive(): void {
+    if (!this.live) return;
+    this.live.provider.destroy();
+    this.live.doc.destroy();
+    this.live = null;
+  }
+
+  private async syncLiveDoc(): Promise<void> {
+    if (!this.running) return;
+    const path = this.activeLiveTextPath();
+    if (this.live?.path === path) return;
+    this.teardownLive();
+    if (!path) return;
+
+    const doc = new Y.Doc();
+    const provider = new WebsocketProvider(this.serverUrl, this.roomFor(path), doc, {
+      connect: true,
+      params: { u: this.auth.user, p: this.auth.pass },
+    });
+    this.live = { path, doc, provider };
+
+    const synced = await this.waitForSync(provider, SYNC_TIMEOUT);
+    if (!this.running || this.live?.path !== path) {
+      provider.destroy();
+      doc.destroy();
+      return;
+    }
+    const text = doc.getText("content");
+
+    // Show the latest shared content when the file opens.
+    const remote = text.toString();
+    if (remote.length > 0 && this.localHashes.get(path) !== hashString(remote)) {
+      this.localHashes.set(path, hashString(remote));
+      void this.writeText(path, remote);
+    }
+
+    text.observe((e) => {
+      if (e.transaction.local) return;
+      const content = text.toString();
+      if (content.length === 0) return;
+      const h = hashString(content);
+      if (this.localHashes.get(path) === h) return;
+      this.localHashes.set(path, h);
+      void this.writeText(path, content);
+    });
+    this.log(`live doc connected for ${path}`);
   }
 
   private roomFor(path: string): string {
