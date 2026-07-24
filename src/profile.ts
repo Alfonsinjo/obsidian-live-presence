@@ -2,14 +2,14 @@ import { requestUrl } from "obsidian";
 
 // Derive the CouchDB base URL from the presence server URL:
 // wss://host/presence -> https://host
-function couchBase(serverUrl: string): string {
+export function couchBase(serverUrl: string): string {
   return serverUrl
     .replace(/^wss:/i, "https:")
     .replace(/^ws:/i, "http:")
     .replace(/\/presence\/?$/i, "");
 }
 
-function authHeader(user: string, pass: string): string {
+export function authHeader(user: string, pass: string): string {
   return `Basic ${btoa(`${user}:${pass}`)}`;
 }
 

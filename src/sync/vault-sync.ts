@@ -1,7 +1,15 @@
 import { type App, type EventRef, TFile, normalizePath } from "obsidian";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
-import { applyMinimalYTextUpdate, debounce, hashString, normalizeLineEndings, sleep } from "../utils";
+import {
+  applyMinimalYTextUpdate,
+  debounce,
+  hashBytes,
+  hashString,
+  normalizeLineEndings,
+  sleep,
+} from "../utils";
+import { blobExists, downloadBlob, uploadBlob } from "./blobs";
 
 interface Auth {
   user: string;
@@ -10,6 +18,8 @@ interface Auth {
 
 // One entry per file in the shared vault index.
 interface IndexEntry {
+  // Kind: "t" text (Markdown, stored as a Yjs document), "b" binary (stored as a blob).
+  k: "t" | "b";
   // Content hash, so peers can tell whether their local copy is current.
   h: string;
   // Last change time (ms), used only as a tie-breaker on startup.
@@ -21,10 +31,26 @@ interface IndexEntry {
 const INDEX_ROOM = "vault-index";
 const SYNC_TIMEOUT = 8000;
 
-// Distributes every Markdown file across devices through the self-hosted relay,
-// using one persistent Yjs document per file plus a shared index document. Open
-// notes are handled by the real-time co-editing binding; this module keeps the
-// rest of the vault in sync in the background.
+const MIME: Record<string, string> = {
+  pdf: "application/pdf",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  bmp: "image/bmp",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  mp3: "audio/mpeg",
+  ogg: "audio/ogg",
+  wav: "audio/wav",
+};
+
+// Distributes the whole vault across devices through the self-hosted relay.
+// Markdown notes travel as Yjs documents (one per note, shared with the real-time
+// co-editing binding); binary files (PDFs, images, ...) travel as content-addressed
+// blobs. A shared index document lists every file and its current version.
 export class VaultSync {
   private indexDoc: Y.Doc | null = null;
   private indexProvider: WebsocketProvider | null = null;
@@ -33,9 +59,9 @@ export class VaultSync {
   private leafRef: EventRef | null = null;
   private running = false;
 
-  // Last content hash we wrote or read per path, to break disk<->doc feedback loops.
+  // Last content hash we wrote or read per path, to break disk<->store feedback loops.
   private localHashes = new Map<string, string>();
-  // Remote content waiting to be written while a file is open in the editor.
+  // Remote text content waiting to be written while a note is open in the editor.
   private pendingWrites = new Map<string, string>();
   private pushers = new Map<string, (path: string) => void>();
 
@@ -75,7 +101,7 @@ export class VaultSync {
         if (f instanceof TFile) this.onLocalChange(f.path);
       }),
       this.app.vault.on("delete", (f) => {
-        if (f instanceof TFile) void this.onLocalDelete(f.path);
+        if (f instanceof TFile) this.onLocalDelete(f.path);
       }),
       this.app.vault.on("rename", (f, oldPath) => {
         if (f instanceof TFile) void this.onLocalRename(f, oldPath);
@@ -106,8 +132,13 @@ export class VaultSync {
     this.files = null;
   }
 
-  private isMarkdown(path: string): boolean {
-    return path.toLowerCase().endsWith(".md");
+  private kindOf(path: string): "t" | "b" {
+    return path.toLowerCase().endsWith(".md") ? "t" : "b";
+  }
+
+  private mimeFor(path: string): string {
+    const ext = path.split(".").pop()?.toLowerCase() ?? "";
+    return MIME[ext] ?? "application/octet-stream";
   }
 
   private isOpenInEditor(path: string): boolean {
@@ -120,25 +151,19 @@ export class VaultSync {
   // anything. Deletions and renames only propagate live, while peers are online.
   private async initialReconcile(): Promise<void> {
     if (!this.files) return;
-    const local = this.app.vault.getMarkdownFiles();
+    const local = this.app.vault.getFiles();
     const localPaths = new Set(local.map((f) => f.path));
 
     for (const file of local) {
       if (!this.running) return;
-      const content = normalizeLineEndings(await this.app.vault.read(file));
-      const h = hashString(content);
+      const h = await this.localHash(file);
       this.localHashes.set(file.path, h);
       const entry = this.files.get(file.path);
       if (!entry || entry.d) {
-        // Not shared yet (or tombstoned but still present locally): publish it.
-        await this.pushContent(file.path, content, h);
+        await this.push(file.path, h);
       } else if (entry.h !== h) {
-        // Both sides have content: newer mtime wins; ties keep local.
-        if (file.stat.mtime >= entry.t) {
-          await this.pushContent(file.path, content, h);
-        } else {
-          await this.pullToDisk(file.path);
-        }
+        if (file.stat.mtime >= entry.t) await this.push(file.path, h);
+        else await this.pull(file.path, entry);
       }
     }
 
@@ -146,14 +171,21 @@ export class VaultSync {
       if (!this.running) return;
       const entry = this.files.get(path);
       if (!entry || entry.d) continue;
-      if (!localPaths.has(path)) await this.pullToDisk(path);
+      if (!localPaths.has(path)) await this.pull(path, entry);
     }
   }
 
+  private async localHash(file: TFile): Promise<string> {
+    if (this.kindOf(file.path) === "t") {
+      return hashString(normalizeLineEndings(await this.app.vault.read(file)));
+    }
+    return hashBytes(new Uint8Array(await this.app.vault.readBinary(file)));
+  }
+
   private onLocalChange(path: string): void {
-    if (!this.running || !this.isMarkdown(path)) return;
-    // A live co-editing session owns this file's document; do not double-write it.
-    if (this.isCoEditing(path)) return;
+    if (!this.running) return;
+    // A live co-editing session owns this note's document; do not double-write it.
+    if (this.kindOf(path) === "t" && this.isCoEditing(path)) return;
     let push = this.pushers.get(path);
     if (!push) {
       push = debounce((p: string) => void this.pushLocalFile(p), 600);
@@ -163,19 +195,26 @@ export class VaultSync {
   }
 
   private async pushLocalFile(path: string): Promise<void> {
-    if (!this.running || !this.files) return;
+    if (!this.running) return;
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    const h = await this.localHash(file);
+    if (this.localHashes.get(path) === h) return; // unchanged, or our own write
+    this.localHashes.set(path, h);
+    await this.push(path, h);
+  }
+
+  // Publish a file (by kind) and record it in the index.
+  private async push(path: string, hash: string): Promise<void> {
+    if (this.kindOf(path) === "t") await this.pushText(path, hash);
+    else await this.pushBlob(path, hash);
+  }
+
+  private async pushText(path: string, hash: string): Promise<void> {
+    if (!this.files) return;
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return;
     const content = normalizeLineEndings(await this.app.vault.read(file));
-    const h = hashString(content);
-    if (this.localHashes.get(path) === h) return; // unchanged, or our own write
-    this.localHashes.set(path, h);
-    await this.pushContent(path, content, h);
-  }
-
-  // Write content into the file's shared document and record it in the index.
-  private async pushContent(path: string, content: string, hash: string): Promise<void> {
-    if (!this.files) return;
     const doc = new Y.Doc();
     const provider = new WebsocketProvider(this.serverUrl, this.roomFor(path), doc, {
       connect: true,
@@ -184,23 +223,42 @@ export class VaultSync {
     try {
       const synced = await this.waitForSync(provider, SYNC_TIMEOUT);
       if (!synced || !this.running) return;
-      const text = doc.getText("content");
-      applyMinimalYTextUpdate(doc, text, content);
+      applyMinimalYTextUpdate(doc, doc.getText("content"), content);
       await sleep(700); // allow the update to reach and be persisted by the server
-      this.files.set(path, { h: hash, t: Date.now() });
-      this.log(`pushed ${path} (${content.length} chars)`);
+      this.files.set(path, { k: "t", h: hash, t: Date.now() });
+      this.log(`pushed text ${path} (${content.length} chars)`);
     } finally {
       provider.destroy();
       doc.destroy();
     }
   }
 
-  // Read the file's shared document and write it to disk (deferred if the note is open).
-  private async pullToDisk(path: string): Promise<void> {
-    const content = await this.readContent(path);
+  private async pushBlob(path: string, hash: string): Promise<void> {
+    if (!this.files) return;
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    const data = await this.app.vault.readBinary(file);
+    const already = await blobExists(this.serverUrl, this.auth.user, this.auth.pass, hash);
+    if (!already) {
+      const ok = await uploadBlob(this.serverUrl, this.auth.user, this.auth.pass, hash, data, this.mimeFor(path));
+      if (!ok) {
+        this.log(`blob upload failed for ${path}`);
+        return;
+      }
+    }
+    this.files.set(path, { k: "b", h: hash, t: Date.now() });
+    this.log(`pushed blob ${path} (${data.byteLength} bytes${already ? ", deduped" : ""})`);
+  }
+
+  private async pull(path: string, entry: IndexEntry): Promise<void> {
+    if (entry.k === "b") await this.pullBinary(path, entry.h);
+    else await this.pullText(path);
+  }
+
+  private async pullText(path: string): Promise<void> {
+    const content = await this.readText(path);
     if (content === null) return;
     if (content.length === 0) {
-      // Never materialise an empty document over anything; treat as "nothing to do".
       this.log(`skip empty pull for ${path}`);
       return;
     }
@@ -209,10 +267,10 @@ export class VaultSync {
       this.log(`deferred write for open file ${path}`);
       return;
     }
-    await this.writeDisk(path, content);
+    await this.writeText(path, content);
   }
 
-  private async readContent(path: string): Promise<string | null> {
+  private async readText(path: string): Promise<string | null> {
     const doc = new Y.Doc();
     const provider = new WebsocketProvider(this.serverUrl, this.roomFor(path), doc, {
       connect: true,
@@ -229,19 +287,36 @@ export class VaultSync {
     }
   }
 
-  private async writeDisk(path: string, content: string): Promise<void> {
-    const h = hashString(content);
-    this.localHashes.set(path, h); // set before writing so our own modify event is ignored
+  private async writeText(path: string, content: string): Promise<void> {
+    this.localHashes.set(path, hashString(content)); // set before writing so our own event is ignored
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) {
       const current = normalizeLineEndings(await this.app.vault.read(existing));
       if (current === content) return;
       await this.app.vault.modify(existing, content);
-      this.log(`wrote ${path} (${content.length} chars)`);
+      this.log(`wrote text ${path} (${content.length} chars)`);
     } else {
       await this.ensureFolder(path);
       await this.app.vault.create(path, content);
-      this.log(`created ${path} (${content.length} chars)`);
+      this.log(`created text ${path} (${content.length} chars)`);
+    }
+  }
+
+  private async pullBinary(path: string, hash: string): Promise<void> {
+    const data = await downloadBlob(this.serverUrl, this.auth.user, this.auth.pass, hash);
+    if (!data || data.byteLength === 0) {
+      this.log(`blob download failed/empty for ${path}`);
+      return;
+    }
+    this.localHashes.set(path, hash); // set before writing so our own event is ignored
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) {
+      await this.app.vault.modifyBinary(existing, data);
+      this.log(`wrote blob ${path} (${data.byteLength} bytes)`);
+    } else {
+      await this.ensureFolder(path);
+      await this.app.vault.createBinary(path, data);
+      this.log(`created blob ${path} (${data.byteLength} bytes)`);
     }
   }
 
@@ -261,7 +336,7 @@ export class VaultSync {
     for (const [path, content] of [...this.pendingWrites]) {
       if (this.isOpenInEditor(path)) continue;
       this.pendingWrites.delete(path);
-      void this.writeDisk(path, content);
+      void this.writeText(path, content);
     }
   }
 
@@ -274,7 +349,7 @@ export class VaultSync {
       if (entry.d) {
         void this.applyRemoteDelete(path);
       } else if (this.localHashes.get(path) !== entry.h) {
-        void this.pullToDisk(path);
+        void this.pull(path, entry);
       }
     }
   }
@@ -288,25 +363,20 @@ export class VaultSync {
     this.log(`trashed ${path} (deleted remotely)`);
   }
 
-  private async onLocalDelete(path: string): Promise<void> {
-    if (!this.running || !this.files || !this.isMarkdown(path)) return;
-    this.files.set(path, { h: "", t: Date.now(), d: 1 });
+  private onLocalDelete(path: string): void {
+    if (!this.running || !this.files) return;
+    this.files.set(path, { k: this.kindOf(path), h: "", t: Date.now(), d: 1 });
     this.localHashes.delete(path);
     this.log(`tombstoned ${path}`);
   }
 
   private async onLocalRename(file: TFile, oldPath: string): Promise<void> {
     if (!this.running || !this.files) return;
-    if (this.isMarkdown(oldPath)) {
-      this.files.set(oldPath, { h: "", t: Date.now(), d: 1 });
-      this.localHashes.delete(oldPath);
-    }
-    if (this.isMarkdown(file.path)) {
-      const content = normalizeLineEndings(await this.app.vault.read(file));
-      const h = hashString(content);
-      this.localHashes.set(file.path, h);
-      await this.pushContent(file.path, content, h);
-    }
+    this.files.set(oldPath, { k: this.kindOf(oldPath), h: "", t: Date.now(), d: 1 });
+    this.localHashes.delete(oldPath);
+    const h = await this.localHash(file);
+    this.localHashes.set(file.path, h);
+    await this.push(file.path, h);
     this.log(`renamed ${oldPath} -> ${file.path}`);
   }
 
