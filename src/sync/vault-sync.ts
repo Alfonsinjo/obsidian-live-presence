@@ -22,7 +22,7 @@ interface IndexEntry {
   k: "t" | "b";
   // Content hash, so peers can tell whether their local copy is current.
   h: string;
-  // Last change time (ms), used only as a tie-breaker on startup.
+  // Last change time (ms), used only as a tie-breaker.
   t: number;
   // Tombstone: 1 means deleted.
   d?: 1;
@@ -30,6 +30,7 @@ interface IndexEntry {
 
 const INDEX_ROOM = "vault-index";
 const SYNC_TIMEOUT = 8000;
+const RECONCILE_INTERVAL = 60000;
 
 const MIME: Record<string, string> = {
   pdf: "application/pdf",
@@ -50,7 +51,8 @@ const MIME: Record<string, string> = {
 // Distributes the whole vault across devices through the self-hosted relay.
 // Markdown notes travel as Yjs documents (one per note, shared with the real-time
 // co-editing binding); binary files (PDFs, images, ...) travel as content-addressed
-// blobs. A shared index document lists every file and its current version.
+// blobs. A shared index document lists every file and its current version. A
+// periodic and reconnect-triggered reconcile makes it resilient to being offline.
 export class VaultSync {
   private indexDoc: Y.Doc | null = null;
   private indexProvider: WebsocketProvider | null = null;
@@ -58,16 +60,23 @@ export class VaultSync {
   private eventRefs: EventRef[] = [];
   private leafRef: EventRef | null = null;
   private running = false;
-  // Persistent connection to the document of the currently open non-CodeMirror
-  // text file (e.g. Excalidraw), so its changes propagate live instead of via the
-  // slower index/pull path.
-  private live: { path: string; doc: Y.Doc; provider: WebsocketProvider } | null = null;
 
-  // Last content hash we wrote or read per path, to break disk<->store feedback loops.
+  // "Base" hash last successfully synchronised per path; only updated on success,
+  // so a failed push/pull is retried by the next reconcile pass.
   private localHashes = new Map<string, string>();
-  // Remote text content waiting to be written while a note is open in the editor.
+  // Cached file mtime, to avoid re-hashing unchanged files on every reconcile.
+  private mtimes = new Map<string, number>();
   private pendingWrites = new Map<string, string>();
   private pushers = new Map<string, (path: string) => void>();
+
+  private reconcileRunning = false;
+  private reconcileTimer: number | null = null;
+  private interval: number | null = null;
+  private onlineHandler = () => this.scheduleReconcile();
+
+  // Persistent connection to the document of the currently open non-CodeMirror
+  // text file (e.g. Excalidraw), so its changes propagate live.
+  private live: { path: string; doc: Y.Doc; provider: WebsocketProvider } | null = null;
 
   constructor(
     private app: App,
@@ -93,7 +102,7 @@ export class VaultSync {
     if (!this.running) return;
     this.log(`index synced=${synced}, entries=${this.files.size}`);
 
-    await this.initialReconcile();
+    await this.reconcilePass(); // initial bootstrap and push of local files
     if (!this.running) return;
 
     this.files.observe((e) => this.onIndexChange(e));
@@ -115,6 +124,12 @@ export class VaultSync {
       this.flushPending();
       void this.syncLiveDoc();
     });
+    this.indexProvider.on("status", (e: { status: string }) => {
+      if (e.status === "connected") this.scheduleReconcile();
+    });
+    window.addEventListener("online", this.onlineHandler);
+    this.interval = window.setInterval(() => this.scheduleReconcile(), RECONCILE_INTERVAL);
+
     void this.syncLiveDoc();
     this.log("vault sync running");
   }
@@ -126,6 +141,15 @@ export class VaultSync {
     if (this.leafRef) {
       this.app.workspace.offref(this.leafRef);
       this.leafRef = null;
+    }
+    window.removeEventListener("online", this.onlineHandler);
+    if (this.interval !== null) {
+      window.clearInterval(this.interval);
+      this.interval = null;
+    }
+    if (this.reconcileTimer !== null) {
+      window.clearTimeout(this.reconcileTimer);
+      this.reconcileTimer = null;
     }
     this.pendingWrites.clear();
     this.pushers.clear();
@@ -156,34 +180,6 @@ export class VaultSync {
       .some((l) => (l.view as unknown as { file?: TFile }).file?.path === path);
   }
 
-  // On startup we take the union of local and remote files and never delete
-  // anything. Deletions and renames only propagate live, while peers are online.
-  private async initialReconcile(): Promise<void> {
-    if (!this.files) return;
-    const local = this.app.vault.getFiles();
-    const localPaths = new Set(local.map((f) => f.path));
-
-    for (const file of local) {
-      if (!this.running) return;
-      const h = await this.localHash(file);
-      this.localHashes.set(file.path, h);
-      const entry = this.files.get(file.path);
-      if (!entry || entry.d) {
-        await this.push(file.path, h);
-      } else if (entry.h !== h) {
-        if (file.stat.mtime >= entry.t) await this.push(file.path, h);
-        else await this.pull(file.path, entry);
-      }
-    }
-
-    for (const path of this.files.keys()) {
-      if (!this.running) return;
-      const entry = this.files.get(path);
-      if (!entry || entry.d) continue;
-      if (!localPaths.has(path)) await this.pull(path, entry);
-    }
-  }
-
   private async localHash(file: TFile): Promise<string> {
     if (this.kindOf(file.path) === "t") {
       return hashString(normalizeLineEndings(await this.app.vault.read(file)));
@@ -191,9 +187,72 @@ export class VaultSync {
     return hashBytes(new Uint8Array(await this.app.vault.readBinary(file)));
   }
 
+  // Full reconcile: take the union of local and remote files, push local changes,
+  // pull remote changes, and never delete on this path. Debounced and guarded so
+  // overlapping runs cannot pile up.
+  private scheduleReconcile(): void {
+    if (this.reconcileTimer !== null) window.clearTimeout(this.reconcileTimer);
+    this.reconcileTimer = window.setTimeout(() => {
+      this.reconcileTimer = null;
+      void this.reconcilePass();
+    }, 1500);
+  }
+
+  private async reconcilePass(): Promise<void> {
+    if (!this.running || !this.files || this.reconcileRunning) return;
+    this.reconcileRunning = true;
+    try {
+      const local = this.app.vault.getFiles();
+      const localPaths = new Set<string>();
+      for (const file of local) {
+        if (!this.running) return;
+        localPaths.add(file.path);
+        await this.reconcileFile(file);
+      }
+      for (const path of [...this.files.keys()]) {
+        if (!this.running) return;
+        const entry = this.files.get(path);
+        if (!entry || entry.d) continue;
+        if (!localPaths.has(path)) await this.pull(path, entry);
+      }
+    } finally {
+      this.reconcileRunning = false;
+    }
+  }
+
+  private async reconcileFile(file: TFile): Promise<void> {
+    if (!this.files) return;
+    const path = file.path;
+    const base = this.localHashes.get(path);
+    const entry = this.files.get(path);
+
+    // Only re-hash when the file actually changed on disk.
+    let current = base;
+    if (base === undefined || this.mtimes.get(path) !== file.stat.mtime) {
+      current = await this.localHash(file);
+      this.mtimes.set(path, file.stat.mtime);
+    }
+    if (current === undefined) return;
+
+    if (entry && !entry.d && entry.h === current) {
+      this.localHashes.set(path, current); // already in sync
+      return;
+    }
+
+    if (current !== base) {
+      // Local content changed since our last successful sync.
+      if (!entry || entry.d || file.stat.mtime >= entry.t) {
+        if (await this.push(path, current)) this.localHashes.set(path, current);
+      } else {
+        await this.pull(path, entry); // remote is newer
+      }
+    } else if (entry && !entry.d && entry.h !== base) {
+      await this.pull(path, entry); // remote changed while we were unchanged
+    }
+  }
+
   private onLocalChange(path: string): void {
     if (!this.running) return;
-    // A live co-editing session owns this note's document; do not double-write it.
     if (this.kindOf(path) === "t" && this.isCoEditing(path)) return;
     let push = this.pushers.get(path);
     if (!push) {
@@ -209,29 +268,30 @@ export class VaultSync {
     if (!(file instanceof TFile)) return;
     const h = await this.localHash(file);
     if (this.localHashes.get(path) === h) return; // unchanged, or our own write
-    this.localHashes.set(path, h);
-    // If this file is the live-connected one, publish straight through its open
-    // document for immediate delivery, and record it in the index for closed peers.
+    // Straight through the open document for immediate delivery.
     if (this.live && this.live.path === path && this.kindOf(path) === "t") {
       const content = normalizeLineEndings(await this.app.vault.read(file));
       applyMinimalYTextUpdate(this.live.doc, this.live.doc.getText("content"), content);
       this.files?.set(path, { k: "t", h, t: Date.now() });
+      this.localHashes.set(path, h);
+      this.mtimes.set(path, file.stat.mtime);
       this.log(`live-pushed ${path} (${content.length} chars)`);
       return;
     }
-    await this.push(path, h);
+    if (await this.push(path, h)) {
+      this.localHashes.set(path, h);
+      this.mtimes.set(path, file.stat.mtime);
+    }
   }
 
-  // Publish a file (by kind) and record it in the index.
-  private async push(path: string, hash: string): Promise<void> {
-    if (this.kindOf(path) === "t") await this.pushText(path, hash);
-    else await this.pushBlob(path, hash);
+  private async push(path: string, hash: string): Promise<boolean> {
+    return this.kindOf(path) === "t" ? this.pushText(path, hash) : this.pushBlob(path, hash);
   }
 
-  private async pushText(path: string, hash: string): Promise<void> {
-    if (!this.files) return;
+  private async pushText(path: string, hash: string): Promise<boolean> {
+    if (!this.files) return false;
     const file = this.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof TFile)) return;
+    if (!(file instanceof TFile)) return false;
     const content = normalizeLineEndings(await this.app.vault.read(file));
     const doc = new Y.Doc();
     const provider = new WebsocketProvider(this.serverUrl, this.roomFor(path), doc, {
@@ -240,32 +300,34 @@ export class VaultSync {
     });
     try {
       const synced = await this.waitForSync(provider, SYNC_TIMEOUT);
-      if (!synced || !this.running) return;
+      if (!synced || !this.running) return false;
       applyMinimalYTextUpdate(doc, doc.getText("content"), content);
-      await sleep(700); // allow the update to reach and be persisted by the server
+      await sleep(600); // allow the update to reach and be persisted by the server
       this.files.set(path, { k: "t", h: hash, t: Date.now() });
       this.log(`pushed text ${path} (${content.length} chars)`);
+      return true;
     } finally {
       provider.destroy();
       doc.destroy();
     }
   }
 
-  private async pushBlob(path: string, hash: string): Promise<void> {
-    if (!this.files) return;
+  private async pushBlob(path: string, hash: string): Promise<boolean> {
+    if (!this.files) return false;
     const file = this.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof TFile)) return;
+    if (!(file instanceof TFile)) return false;
     const data = await this.app.vault.readBinary(file);
     const already = await blobExists(this.serverUrl, this.auth.user, this.auth.pass, hash);
     if (!already) {
       const ok = await uploadBlob(this.serverUrl, this.auth.user, this.auth.pass, hash, data, this.mimeFor(path));
       if (!ok) {
         this.log(`blob upload failed for ${path}`);
-        return;
+        return false;
       }
     }
     this.files.set(path, { k: "b", h: hash, t: Date.now() });
     this.log(`pushed blob ${path} (${data.byteLength} bytes${already ? ", deduped" : ""})`);
+    return true;
   }
 
   private async pull(path: string, entry: IndexEntry): Promise<void> {
@@ -306,12 +368,13 @@ export class VaultSync {
   }
 
   private async writeText(path: string, content: string): Promise<void> {
-    this.localHashes.set(path, hashString(content)); // set before writing so our own event is ignored
+    this.localHashes.set(path, hashString(content));
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) {
       const current = normalizeLineEndings(await this.app.vault.read(existing));
       if (current === content) return;
       await this.app.vault.modify(existing, content);
+      this.mtimes.set(path, existing.stat.mtime);
       this.log(`wrote text ${path} (${content.length} chars)`);
     } else {
       await this.ensureFolder(path);
@@ -326,10 +389,11 @@ export class VaultSync {
       this.log(`blob download failed/empty for ${path}`);
       return;
     }
-    this.localHashes.set(path, hash); // set before writing so our own event is ignored
+    this.localHashes.set(path, hash);
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) {
       await this.app.vault.modifyBinary(existing, data);
+      this.mtimes.set(path, existing.stat.mtime);
       this.log(`wrote blob ${path} (${data.byteLength} bytes)`);
     } else {
       await this.ensureFolder(path);
@@ -377,6 +441,7 @@ export class VaultSync {
     if (!(file instanceof TFile)) return;
     if (this.isOpenInEditor(path)) return; // do not pull the rug from under an open note
     this.localHashes.delete(path);
+    this.mtimes.delete(path);
     await this.app.fileManager.trashFile(file);
     this.log(`trashed ${path} (deleted remotely)`);
   }
@@ -385,6 +450,7 @@ export class VaultSync {
     if (!this.running || !this.files) return;
     this.files.set(path, { k: this.kindOf(path), h: "", t: Date.now(), d: 1 });
     this.localHashes.delete(path);
+    this.mtimes.delete(path);
     this.log(`tombstoned ${path}`);
   }
 
@@ -392,15 +458,17 @@ export class VaultSync {
     if (!this.running || !this.files) return;
     this.files.set(oldPath, { k: this.kindOf(oldPath), h: "", t: Date.now(), d: 1 });
     this.localHashes.delete(oldPath);
+    this.mtimes.delete(oldPath);
     const h = await this.localHash(file);
-    this.localHashes.set(file.path, h);
-    await this.push(file.path, h);
+    if (await this.push(file.path, h)) {
+      this.localHashes.set(file.path, h);
+      this.mtimes.set(file.path, file.stat.mtime);
+    }
     this.log(`renamed ${oldPath} -> ${file.path}`);
   }
 
   // Path of the active file when it is a text file shown in a non-CodeMirror view
-  // (Excalidraw and similar). Those cannot use the co-editing binding, so we keep a
-  // live document connection for them instead.
+  // (Excalidraw and similar), which cannot use the co-editing binding.
   private activeLiveTextPath(): string | null {
     const view = this.app.workspace.activeLeaf?.view as unknown as {
       getViewType?: () => string;
@@ -441,10 +509,8 @@ export class VaultSync {
     }
     const text = doc.getText("content");
 
-    // Show the latest shared content when the file opens.
     const remote = text.toString();
     if (remote.length > 0 && this.localHashes.get(path) !== hashString(remote)) {
-      this.localHashes.set(path, hashString(remote));
       void this.writeText(path, remote);
     }
 
@@ -452,9 +518,7 @@ export class VaultSync {
       if (e.transaction.local) return;
       const content = text.toString();
       if (content.length === 0) return;
-      const h = hashString(content);
-      if (this.localHashes.get(path) === h) return;
-      this.localHashes.set(path, h);
+      if (this.localHashes.get(path) === hashString(content)) return;
       void this.writeText(path, content);
     });
     this.log(`live doc connected for ${path}`);
