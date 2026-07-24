@@ -36,6 +36,10 @@ export class CollabBinding {
     return this.provider !== null;
   }
 
+  private log(...args: unknown[]): void {
+    console.log("[LivePresence]", ...args);
+  }
+
   async engage(
     view: EditorView,
     path: string,
@@ -45,66 +49,84 @@ export class CollabBinding {
   ): Promise<void> {
     await this.disengage();
     const gen = ++this.gen;
+    this.log(`engage: ${path} via ${serverUrl}`);
 
-    const doc = new Y.Doc();
-    const provider = new WebsocketProvider(serverUrl, `doc:${encodeURIComponent(path)}`, doc, {
-      connect: true,
-      params: { u: auth.user, p: auth.pass },
-    });
-    const text = doc.getText("content");
-    this.doc = doc;
-    this.provider = provider;
-    this.view = view;
-    this.path = path;
+    try {
+      const doc = new Y.Doc();
+      const provider = new WebsocketProvider(serverUrl, `doc:${encodeURIComponent(path)}`, doc, {
+        connect: true,
+        params: { u: auth.user, p: auth.pass },
+      });
+      const text = doc.getText("content");
+      this.doc = doc;
+      this.provider = provider;
+      this.view = view;
+      this.path = path;
 
-    const synced = await this.waitForSync(provider, 8000);
-    if (this.gen !== gen || this.destroyed(view)) return;
-    if (!synced) {
-      new Notice("Live Presence: Co-Editing konnte nicht verbinden (Zeitüberschreitung).");
-      await this.disengage();
-      return;
-    }
+      provider.on("status", (e: { status: string }) => this.log("ws status:", e.status));
+      provider.on("connection-error", () => this.log("ws connection-error"));
 
-    // Announce ourselves in the doc room first (used for the seed election and by yCollab).
-    provider.awareness.setLocalStateField("user", {
-      name: user.name,
-      color: user.color,
-      colorLight: withAlpha(user.color, 0.25),
-    });
-
-    // Reconcile editor <-> shared text. CRITICAL: never clear a non-empty editor.
-    const local = normalizeLineEndings(view.state.doc.toString());
-    if (text.length > 0) {
-      // Shared text already has content -> adopt it into the editor.
-      applyMinimalCmUpdate(view, text.toString());
-    } else if (local.length > 0) {
-      // Shared text is empty but we have content. Wait briefly for a peer to seed it,
-      // then adopt; otherwise seed from our own content. Never wipe the editor.
-      await sleep(400);
+      const synced = await this.waitForSync(provider, 8000);
       if (this.gen !== gen || this.destroyed(view)) return;
-      const self = provider.awareness.clientID;
-      const others = [...provider.awareness.getStates().keys()].filter((id) => id !== self);
-      const iSeed = others.length === 0 || self <= Math.min(...others);
-      if (!iSeed) {
-        for (let i = 0; i < 25 && text.length === 0; i++) {
-          await sleep(100);
-          if (this.gen !== gen || this.destroyed(view)) return;
-        }
+      this.log(`synced=${synced} sharedTextLen=${text.length}`);
+      if (!synced) {
+        new Notice("Live Presence: Co-Editing konnte nicht verbinden (Zeitüberschreitung).");
+        await this.disengage();
+        return;
       }
-      if (text.length > 0) {
-        applyMinimalCmUpdate(view, text.toString());
-      } else {
-        applyMinimalYTextUpdate(doc, text, local);
-      }
-    }
-    // If both are empty there is nothing to reconcile.
-    if (this.gen !== gen || this.destroyed(view)) return;
 
-    const ext = yCollab(text, provider.awareness, { undoManager: false });
-    view.dispatch({
-      effects: this.compartment.reconfigure(Array.isArray(ext) ? [...ext] : [ext]),
-    });
-    new Notice(`Live Presence: Co-Editing aktiv (${path}).`);
+      // Announce ourselves in the doc room first (used for the seed election and by yCollab).
+      provider.awareness.setLocalStateField("user", {
+        name: user.name,
+        color: user.color,
+        colorLight: withAlpha(user.color, 0.25),
+      });
+
+      // Reconcile editor <-> shared text. CRITICAL: never clear a non-empty editor.
+      const local = normalizeLineEndings(view.state.doc.toString());
+      if (text.length > 0) {
+        // Shared text already has content -> adopt it into the editor.
+        this.log("adopt shared text into editor");
+        applyMinimalCmUpdate(view, text.toString());
+      } else if (local.length > 0) {
+        // Shared text is empty but we have content. Wait briefly for a peer to seed it,
+        // then adopt; otherwise seed from our own content. Never wipe the editor.
+        await sleep(400);
+        if (this.gen !== gen || this.destroyed(view)) return;
+        const self = provider.awareness.clientID;
+        const others = [...provider.awareness.getStates().keys()].filter((id) => id !== self);
+        const iSeed = others.length === 0 || self <= Math.min(...others);
+        this.log(`shared empty; iSeed=${iSeed} peers=${others.length}`);
+        if (!iSeed) {
+          for (let i = 0; i < 25 && text.length === 0; i++) {
+            await sleep(100);
+            if (this.gen !== gen || this.destroyed(view)) return;
+          }
+        }
+        if (text.length > 0) {
+          applyMinimalCmUpdate(view, text.toString());
+        } else {
+          applyMinimalYTextUpdate(doc, text, local);
+        }
+      } else {
+        this.log("both empty; nothing to reconcile");
+      }
+      // If both are empty there is nothing to reconcile.
+      if (this.gen !== gen || this.destroyed(view)) return;
+
+      text.observe(() => this.log(`shared text changed, len=${text.length}`));
+
+      const ext = yCollab(text, provider.awareness, { undoManager: false });
+      view.dispatch({
+        effects: this.compartment.reconfigure(Array.isArray(ext) ? [...ext] : [ext]),
+      });
+      this.log("yCollab attached; co-editing active for", path);
+      new Notice(`Live Presence: Co-Editing aktiv (${path}).`);
+    } catch (err) {
+      console.error("[LivePresence] engage failed:", err);
+      new Notice("Live Presence: Co-Editing-Fehler (siehe Konsole).");
+      await this.disengage();
+    }
   }
 
   async disengage(): Promise<void> {

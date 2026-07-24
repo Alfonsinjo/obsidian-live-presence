@@ -87,6 +87,16 @@ export default class LivePresencePlugin extends Plugin {
       }),
     );
 
+    // When the active file is renamed, move the co-editing session to the new path
+    // so the local editor keeps following instead of dropping out.
+    this.registerEvent(
+      this.app.vault.on("rename", (_file, oldPath) => {
+        if (this.binding.path === oldPath) {
+          void this.binding.disengage().then(() => this.evaluateCoedit());
+        }
+      }),
+    );
+
     // Leave immediately on quit instead of waiting for the server-side timeout.
     this.registerDomEvent(window, "beforeunload", () => this.presence?.destroy());
   }
@@ -121,6 +131,9 @@ export default class LivePresencePlugin extends Plugin {
     }
 
     const participants = this.presence.getAll().filter((e) => e.state.file === file).length;
+    console.log(
+      `[LivePresence] evaluate: file=${file} participants=${participants} active=${this.binding.isActive(file)}`,
+    );
 
     if (participants >= 2) {
       if (this.coeditDisengageTimer !== null) {

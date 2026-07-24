@@ -1,7 +1,7 @@
 {
   "id": "live-presence",
   "name": "Live Presence",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "minAppVersion": "1.5.0",
   "description": "See who else is in your vault and which note they are in, with live cursors. Self-hosted real-time presence via Yjs (bring your own server).",
   "author": "Thomas Stabel, AG Schotten (RPTU Kaiserslautern)",

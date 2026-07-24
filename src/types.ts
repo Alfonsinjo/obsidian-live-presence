@@ -18,7 +18,7 @@ export const DEFAULT_SETTINGS: LivePresenceSettings = {
   color: "",
   authUser: "",
   authPass: "",
-  enableCoedit: false,
+  enableCoedit: true,
 };
 
 // Cursor/selection as absolute character offsets.
