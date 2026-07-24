@@ -27,9 +27,10 @@ Phase 1 (this release):
 * Live cursors and selections of other people inside the note that is currently open, each shown in a distinct colour with a name label.
 * Awareness only. The plugin exchanges presence and cursor information exclusively and never transfers file contents, so it coexists with any file synchronisation plugin.
 
-Planned (Phase 2):
+Co-editing (experimental):
 
-* Simultaneous editing per note, based on Yjs CRDTs, engaged automatically when two or more people are in the same file, including automatic coordination so that it does not conflict with a file synchronisation plugin.
+* The command "Co-editing for the current file on/off" binds the open note to a shared Yjs document, so text is edited character by character in real time with correct remote cursors. It is manual for now: engage it on the same note on each side.
+* While a note is co-edited, pause your file-sync plugin for it. Automatic engagement when two or more people open the same file, and automatic coordination with the file-sync plugin, are planned.
 
 ## How it works
 

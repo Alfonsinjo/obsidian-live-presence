@@ -60,6 +60,21 @@
 .lp-roster-user.lp-self { opacity: 0.75; }
 .lp-roster-empty { color: var(--text-muted); font-style: italic; padding: 8px 0; }
 
+/* Remote cursors during co-editing (rendered by y-codemirror.next) */
+.cm-ySelectionCaret {
+  position: relative;
+  word-break: normal;
+  pointer-events: none;
+}
+.cm-ySelectionInfo {
+  font-size: 0.7em;
+  line-height: 1;
+  padding: 1px 4px;
+  border-radius: 3px 3px 3px 0;
+  color: #fff;
+  white-space: nowrap;
+}
+
 /* Statusleiste */
 .lp-statusbar { cursor: pointer; }
 .lp-statusbar .lp-roster-dot { display: inline-block; margin-right: 4px; vertical-align: middle; }

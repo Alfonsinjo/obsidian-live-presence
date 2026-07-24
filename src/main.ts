@@ -1,5 +1,6 @@
 import { EditorView } from "@codemirror/view";
 import { MarkdownView, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
+import { CollabBinding } from "./collab/binding";
 import { PresenceConnection } from "./presence";
 import { type RemoteCursor, remoteCursorsField, setRemoteCursors } from "./remote-cursors";
 import { ROSTER_VIEW_TYPE, RosterView } from "./roster-view";
@@ -15,6 +16,7 @@ function getCmView(view: MarkdownView): EditorView | undefined {
 export default class LivePresencePlugin extends Plugin {
   settings!: LivePresenceSettings;
   presence!: PresenceConnection;
+  private binding = new CollabBinding();
   private statusBarEl!: HTMLElement;
   // CodeMirror view of the file that currently has focus; used for cursor reporting.
   private activeCm: EditorView | null = null;
@@ -58,13 +60,20 @@ export default class LivePresencePlugin extends Plugin {
       const sel = update.state.selection.main;
       this.reportCursor(sel.anchor, sel.head, update.state.doc.length);
     });
-    this.registerEditorExtension([remoteCursorsField, cursorReporter]);
+    this.registerEditorExtension([remoteCursorsField, cursorReporter, this.binding.baseExtension()]);
 
     this.addRibbonIcon("users", "Live Presence: Wer ist da?", () => this.activateRoster());
     this.addCommand({
       id: "lp-presence-open-roster",
       name: "Roster öffnen (wer ist gerade im Vault)",
       callback: () => this.activateRoster(),
+    });
+    this.addCommand({
+      id: "lp-toggle-coedit",
+      name: "Co-Editing für aktuelle Datei ein/aus (experimentell)",
+      callback: () => {
+        void this.toggleCoedit();
+      },
     });
 
     this.app.workspace.onLayoutReady(() => {
@@ -89,7 +98,34 @@ export default class LivePresencePlugin extends Plugin {
   }
 
   onunload(): void {
+    void this.binding.disengage();
     this.presence?.destroy();
+  }
+
+  private async toggleCoedit(): Promise<void> {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const cm = view ? getCmView(view) : undefined;
+    const file = view?.file?.path ?? null;
+    if (!view || !cm || !file) {
+      new Notice("Live Presence: Keine Markdown-Datei aktiv.");
+      return;
+    }
+    if (this.binding.isActive(file)) {
+      await this.binding.disengage();
+      new Notice("Live Presence: Co-Editing beendet.");
+      return;
+    }
+    if (!this.settings.serverUrl) {
+      new Notice("Live Presence: Bitte die Server-URL in den Einstellungen eintragen.");
+      return;
+    }
+    await this.binding.engage(
+      cm,
+      file,
+      this.settings.serverUrl,
+      this.effectiveAuth(),
+      this.effectiveUser(),
+    );
   }
 
   private effectiveUser(): { name: string; color: string } {
@@ -105,8 +141,13 @@ export default class LivePresencePlugin extends Plugin {
   // Track the active file + editor and publish them.
   private updateActiveContext(): void {
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const activePath = view?.file?.path ?? null;
+    // Co-editing follows a single file; leaving it ends the session.
+    if (this.binding.active && this.binding.path !== activePath) {
+      void this.binding.disengage();
+    }
     this.activeCm = view ? (getCmView(view) ?? null) : null;
-    this.presence.setFile(view?.file?.path ?? null);
+    this.presence.setFile(activePath);
     if (view && this.activeCm) {
       const sel = this.activeCm.state.selection.main;
       this.presence.setCursor({
@@ -146,6 +187,11 @@ export default class LivePresencePlugin extends Plugin {
       const cm = getCmView(view);
       if (!cm) continue;
       const file = view.file?.path ?? null;
+      // While co-editing a file, yCollab draws the cursors, so suppress ours there.
+      if (file && this.binding.isActive(file)) {
+        cm.dispatch({ effects: setRemoteCursors.of([]) });
+        continue;
+      }
       const cursors: RemoteCursor[] = [];
       if (file) {
         for (const r of remotes) {
