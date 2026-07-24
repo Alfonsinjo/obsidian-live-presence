@@ -94,6 +94,22 @@ export class LivePresenceSettingTab extends PluginSettingTab {
           }),
       );
 
+    new Setting(containerEl).setName("Echtzeit-Co-Editing").setHeading();
+
+    new Setting(containerEl)
+      .setName("Co-Editing aktivieren")
+      .setDesc(
+        "Bearbeitet dieselbe Notiz zeichenweise in Echtzeit, sobald zwei oder mehr Personen sie geöffnet haben. " +
+          "Standardmäßig aus. Anwesenheit und Cursor funktionieren unabhängig davon.",
+      )
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.enableCoedit).onChange(async (v) => {
+          this.plugin.settings.enableCoedit = v;
+          await this.plugin.saveSettings();
+          this.plugin.reconnect();
+        }),
+      );
+
     new Setting(containerEl)
       .setName("Anmelden")
       .setDesc("Mit den obigen Daten verbinden und die Verbindung testen. Das Ergebnis erscheint als Hinweis.")

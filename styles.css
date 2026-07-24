@@ -64,7 +64,7 @@
 .cm-ySelectionCaret {
   position: relative;
   word-break: normal;
-  pointer-events: none;
+  pointer-events: auto;
 }
 .cm-ySelectionInfo {
   font-size: 0.7em;
@@ -73,6 +73,11 @@
   border-radius: 3px 3px 3px 0;
   color: #fff;
   white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.12s ease-in-out;
+}
+.cm-ySelectionCaret:hover .cm-ySelectionInfo {
+  opacity: 1;
 }
 
 /* Statusleiste */

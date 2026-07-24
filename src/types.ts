@@ -8,6 +8,8 @@ export interface LivePresenceSettings {
   // CouchDB login (same account as LiveSync). Required to connect.
   authUser: string;
   authPass: string;
+  // Real-time co-editing (shared text). Off by default; presence and cursors work without it.
+  enableCoedit: boolean;
 }
 
 export const DEFAULT_SETTINGS: LivePresenceSettings = {
@@ -16,6 +18,7 @@ export const DEFAULT_SETTINGS: LivePresenceSettings = {
   color: "",
   authUser: "",
   authPass: "",
+  enableCoedit: false,
 };
 
 // Cursor/selection as absolute character offsets.

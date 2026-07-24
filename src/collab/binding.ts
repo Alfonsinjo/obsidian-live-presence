@@ -65,31 +65,41 @@ export class CollabBinding {
       return;
     }
 
-    // Seed or reconcile so editor and Y.Text match before binding.
-    if (text.length === 0) {
-      await sleep(400); // let peers announce themselves
-      if (this.gen !== gen || this.destroyed(view)) return;
-      const ids = [...provider.awareness.getStates().keys()];
-      const lowest = ids.length === 0 || provider.awareness.clientID <= Math.min(...ids);
-      if (text.length === 0 && lowest) {
-        applyMinimalYTextUpdate(doc, text, normalizeLineEndings(view.state.doc.toString()));
-      } else {
-        for (let i = 0; i < 20 && text.length === 0; i++) {
-          await sleep(100);
-          if (this.gen !== gen || this.destroyed(view)) return;
-        }
-        applyMinimalCmUpdate(view, text.toString());
-      }
-    } else {
-      applyMinimalCmUpdate(view, text.toString());
-    }
-    if (this.gen !== gen || this.destroyed(view)) return;
-
+    // Announce ourselves in the doc room first (used for the seed election and by yCollab).
     provider.awareness.setLocalStateField("user", {
       name: user.name,
       color: user.color,
       colorLight: withAlpha(user.color, 0.25),
     });
+
+    // Reconcile editor <-> shared text. CRITICAL: never clear a non-empty editor.
+    const local = normalizeLineEndings(view.state.doc.toString());
+    if (text.length > 0) {
+      // Shared text already has content -> adopt it into the editor.
+      applyMinimalCmUpdate(view, text.toString());
+    } else if (local.length > 0) {
+      // Shared text is empty but we have content. Wait briefly for a peer to seed it,
+      // then adopt; otherwise seed from our own content. Never wipe the editor.
+      await sleep(400);
+      if (this.gen !== gen || this.destroyed(view)) return;
+      const self = provider.awareness.clientID;
+      const others = [...provider.awareness.getStates().keys()].filter((id) => id !== self);
+      const iSeed = others.length === 0 || self <= Math.min(...others);
+      if (!iSeed) {
+        for (let i = 0; i < 25 && text.length === 0; i++) {
+          await sleep(100);
+          if (this.gen !== gen || this.destroyed(view)) return;
+        }
+      }
+      if (text.length > 0) {
+        applyMinimalCmUpdate(view, text.toString());
+      } else {
+        applyMinimalYTextUpdate(doc, text, local);
+      }
+    }
+    // If both are empty there is nothing to reconcile.
+    if (this.gen !== gen || this.destroyed(view)) return;
+
     const ext = yCollab(text, provider.awareness, { undoManager: false });
     view.dispatch({
       effects: this.compartment.reconfigure(Array.isArray(ext) ? [...ext] : [ext]),

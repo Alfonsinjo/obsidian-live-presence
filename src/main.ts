@@ -98,11 +98,27 @@ export default class LivePresencePlugin extends Plugin {
 
   // Start co-editing automatically when two or more people share the active file,
   // and stop shortly after fewer than two remain (grace period against tab switches).
+  private isExcalidraw(view: MarkdownView): boolean {
+    const path = view.file?.path ?? "";
+    if (/\.excalidraw(\.md)?$/i.test(path)) return true;
+    const fm = view.file ? this.app.metadataCache.getFileCache(view.file)?.frontmatter : null;
+    return fm != null && fm["excalidraw-plugin"] != null;
+  }
+
   private evaluateCoedit(): void {
+    if (!this.settings.enableCoedit) {
+      if (this.binding.active) void this.binding.disengage();
+      return;
+    }
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     const cm = view ? getCmView(view) : undefined;
     const file = view?.file?.path ?? null;
-    if (!this.settings.serverUrl || !file || !cm) return;
+    if (!this.settings.serverUrl || !file || !cm || !view) return;
+    // Never co-edit Excalidraw notes: their body is a machine-managed data block.
+    if (this.isExcalidraw(view)) {
+      if (this.binding.isActive(file)) void this.binding.disengage();
+      return;
+    }
 
     const participants = this.presence.getAll().filter((e) => e.state.file === file).length;
 
