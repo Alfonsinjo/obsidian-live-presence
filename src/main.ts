@@ -199,14 +199,16 @@ export default class LivePresencePlugin extends Plugin {
     );
     this.presence.onChange(() => this.onPresenceChange());
 
-    if (withToast) {
-      new Notice("Live Presence: Verbinde …");
+    // Always report a failed or absent connection (including on normal startup);
+    // only announce the attempt and success when the user connects manually.
+    {
+      if (withToast) new Notice("Live Presence: Verbinde …");
       let settled = false;
       const timer = window.setTimeout(() => {
         if (settled) return;
         settled = true;
         new Notice(
-          "Live Presence: Verbindung fehlgeschlagen (Zeitüberschreitung). Server-URL, Login und Netzwerk prüfen.",
+          "Live Presence: Keine Verbindung zum Server (Zeitüberschreitung). Server-URL, Login und Netzwerk prüfen.",
         );
       }, 8000);
       this.presence.onStatus((status) => {
@@ -214,12 +216,12 @@ export default class LivePresencePlugin extends Plugin {
         if (status === "connected") {
           settled = true;
           window.clearTimeout(timer);
-          new Notice("Live Presence: Verbunden.");
+          if (withToast) new Notice("Live Presence: Verbunden.");
         } else if (status === "error") {
           settled = true;
           window.clearTimeout(timer);
           new Notice(
-            "Live Presence: Verbindung fehlgeschlagen. Login (Benutzer/Passwort), Server-URL und Netzwerk prüfen.",
+            "Live Presence: Keine Verbindung zum Server. Login (Benutzer/Passwort), Server-URL und Netzwerk prüfen.",
           );
         }
       });
@@ -250,16 +252,32 @@ export default class LivePresencePlugin extends Plugin {
     if (!serverUrl || !authUser || !authPass) {
       return this.settings.userName || "Anonym";
     }
-    let name = await fetchProfileName(serverUrl, authUser, authPass);
-    if (!name) {
-      name = await this.promptName(this.settings.userName || "");
-      if (name) {
-        await saveProfileName(serverUrl, authUser, authPass, name);
-        this.settings.userName = name;
-        await this.saveData(this.settings);
+    const res = await fetchProfileName(serverUrl, authUser, authPass);
+
+    // Server knows our name: adopt it (and cache locally).
+    if (res.reachable && res.name) {
+      if (res.name !== this.settings.userName) {
+        this.settings.userName = res.name;
+        await this.saveSettings();
       }
+      return res.name;
     }
-    return name || this.settings.userName || "Anonym";
+
+    // If we already have a locally stored name, use it and never ask again just
+    // because the server is offline; push it up when the server is reachable.
+    if (this.settings.userName) {
+      if (res.reachable) void saveProfileName(serverUrl, authUser, authPass, this.settings.userName);
+      return this.settings.userName;
+    }
+
+    // No name anywhere yet: ask once, store locally, and store on the server if reachable.
+    const name = await this.promptName("");
+    if (name) {
+      this.settings.userName = name;
+      await this.saveSettings();
+      if (res.reachable) void saveProfileName(serverUrl, authUser, authPass, name);
+    }
+    return name || "Anonym";
   }
 
   private promptName(initial: string): Promise<string> {

@@ -13,12 +13,21 @@ export function authHeader(user: string, pass: string): string {
   return `Basic ${btoa(`${user}:${pass}`)}`;
 }
 
+export interface ProfileResult {
+  // Whether the server answered at all (false means unreachable/offline).
+  reachable: boolean;
+  // The stored display name, or null if the server has none yet.
+  name: string | null;
+}
+
 // Reads the display name stored for this account in the ksk_profiles database.
+// Distinguishes "server unreachable" from "no profile stored yet" so callers do
+// not keep asking for the name whenever the server happens to be offline.
 export async function fetchProfileName(
   serverUrl: string,
   user: string,
   pass: string,
-): Promise<string | null> {
+): Promise<ProfileResult> {
   const url = `${couchBase(serverUrl)}/ksk_profiles/${encodeURIComponent(user)}`;
   try {
     const res = await requestUrl({
@@ -29,12 +38,14 @@ export async function fetchProfileName(
     });
     if (res.status === 200) {
       const name = res.json?.name;
-      return typeof name === "string" && name.length > 0 ? name : null;
+      return { reachable: true, name: typeof name === "string" && name.length > 0 ? name : null };
     }
+    // Server answered (e.g. 404 no profile, 401 auth) -> reachable, but no usable name.
+    return { reachable: true, name: null };
   } catch {
-    // network/DNS error -> treat as "no profile yet"
+    // network/DNS error -> server not reachable
+    return { reachable: false, name: null };
   }
-  return null;
 }
 
 // Stores the display name for this account (each account may only write its own).
