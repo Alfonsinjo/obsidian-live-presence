@@ -209,6 +209,52 @@
   color: var(--text-muted);
 }
 
+.lp-ver-hint {
+  font-size: 0.72em;
+  color: var(--text-muted);
+  margin: 4px 0 8px;
+}
+.lp-ver-clickable {
+  cursor: pointer;
+  border-radius: 4px;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+.lp-ver-clickable:hover {
+  background: var(--background-modifier-hover);
+}
+.lp-btn-active {
+  background: var(--interactive-accent) !important;
+  color: var(--text-on-accent) !important;
+}
+
+/* Legenden-Leiste oben im Editor (Verlauf im Text) */
+.lp-overlay-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  font-size: 0.8em;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+.lp-overlay-title {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.lp-overlay-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.lp-overlay-dot {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+}
+
 /* Statusleiste */
 .lp-statusbar { cursor: pointer; }
 .lp-statusbar .lp-roster-dot { display: inline-block; margin-right: 4px; vertical-align: middle; }

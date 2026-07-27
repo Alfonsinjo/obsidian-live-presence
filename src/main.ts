@@ -1,9 +1,11 @@
 import { EditorView } from "@codemirror/view";
 import { MarkdownView, Notice, Plugin, TFile, type WorkspaceLeaf } from "obsidian";
+import { readAuthorRuns } from "./blame";
 import { BlameModal } from "./blame-modal";
 import { CollabBinding } from "./collab/binding";
-import { listVersions, saveVersion as storeVersion } from "./history";
+import { diffLines, listVersions, saveVersion as storeVersion } from "./history";
 import { HistoryModal } from "./history-modal";
+import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
 import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
 import { fetchProfileName, saveProfileName } from "./profile";
@@ -12,7 +14,7 @@ import { ROSTER_VIEW_TYPE, RosterView } from "./roster-view";
 import { LivePresenceSettingTab } from "./settings";
 import { VaultSync } from "./sync/vault-sync";
 import { DEFAULT_SETTINGS, type LivePresenceSettings } from "./types";
-import { colorFromName, debounce, normalizeLineEndings } from "./utils";
+import { colorFromName, debounce, normalizeLineEndings, withAlpha } from "./utils";
 
 // Obsidian exposes the underlying CodeMirror 6 view as editor.cm (undocumented but stable).
 function getCmView(view: MarkdownView): EditorView | undefined {
@@ -31,6 +33,9 @@ export default class LivePresencePlugin extends Plugin {
   private activeCm: EditorView | null = null;
   // Full name resolved from the profile database.
   private displayName = "";
+  // In-editor history overlay state.
+  private overlayMode: "authors" | "since" | null = null;
+  private overlaySinceT: number | null = null;
 
   private reportCursor = debounce((anchor: number, head: number, docLen: number) => {
     this.presence?.setCursor({ anchor, head, docLen });
@@ -59,7 +64,10 @@ export default class LivePresencePlugin extends Plugin {
           loadVersions: (path) => this.loadVersions(path),
           onSaveVersion: () => this.saveVersion(),
           onOpenHistory: () => this.showHistory(),
-          onOpenBlame: () => this.showBlame(),
+          onToggleAuthors: () => void this.toggleAuthorsOverlay(),
+          onShowSince: (t) => void this.showSinceOverlay(t),
+          onClearOverlay: () => this.clearOverlay(),
+          overlayInfo: () => this.overlayInfo(),
         }),
     );
 
@@ -75,7 +83,12 @@ export default class LivePresencePlugin extends Plugin {
       const sel = update.state.selection.main;
       this.reportCursor(sel.anchor, sel.head, update.state.doc.length);
     });
-    this.registerEditorExtension([remoteCursorsField, cursorReporter, this.binding.baseExtension()]);
+    this.registerEditorExtension([
+      remoteCursorsField,
+      cursorReporter,
+      this.binding.baseExtension(),
+      inlineOverlayExtension(),
+    ]);
 
     this.addRibbonIcon("users", "Live Presence: Wer ist da?", () => this.activateRoster());
     this.addCommand({
@@ -110,6 +123,7 @@ export default class LivePresencePlugin extends Plugin {
       this.app.workspace.on("active-leaf-change", () => {
         this.updateActiveContext();
         this.onPresenceChange();
+        this.reapplyOverlayOnLeafChange();
       }),
     );
 
@@ -433,6 +447,135 @@ export default class LivePresencePlugin extends Plugin {
     if (!this.settings.serverUrl) return [];
     const versions = await listVersions(this.settings.serverUrl, this.effectiveAuth(), path);
     return versions.map((v) => ({ t: v.t, by: v.by }));
+  }
+
+  private activeCmView(): EditorView | undefined {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    return view ? getCmView(view) : undefined;
+  }
+
+  private refreshRosters(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(ROSTER_VIEW_TYPE)) {
+      if (leaf.view instanceof RosterView) leaf.view.refresh();
+    }
+  }
+
+  overlayInfo(): { mode: "authors" | "since" | null; sinceT: number | null } {
+    return { mode: this.overlayMode, sinceT: this.overlaySinceT };
+  }
+
+  clearOverlay(): void {
+    this.activeCmView()?.dispatch({ effects: setOverlay.of(null) });
+    this.overlayMode = null;
+    this.overlaySinceT = null;
+    this.refreshRosters();
+  }
+
+  async toggleAuthorsOverlay(): Promise<void> {
+    if (this.overlayMode === "authors") {
+      this.clearOverlay();
+      return;
+    }
+    await this.applyAuthorsOverlay(false);
+  }
+
+  private async applyAuthorsOverlay(silent: boolean): Promise<void> {
+    const path = this.activePath();
+    if (!path || !this.settings.serverUrl) {
+      if (!silent) new Notice("Live Presence: Keine aktive Notiz.");
+      return;
+    }
+    const runs = await readAuthorRuns(this.settings.serverUrl, this.effectiveAuth(), path);
+    if (!runs) {
+      if (!silent) new Notice("Live Presence: Nicht mit dem Server verbunden.");
+      return;
+    }
+    const cm = this.activeCmView();
+    const total = runs.reduce((n, r) => n + r.text.length, 0);
+    if (!cm || total !== cm.state.doc.length) {
+      if (!silent) new Notice("Live Presence: Text noch nicht synchron – kurz warten und erneut versuchen.");
+      return;
+    }
+    let pos = 0;
+    const oruns: OverlayRun[] = [];
+    const legend = new Map<string, string>();
+    for (const r of runs) {
+      const from = pos;
+      const to = pos + r.text.length;
+      pos = to;
+      if (to > from) oruns.push({ from, to, color: withAlpha(r.color, 0.28), label: r.name });
+      if (!legend.has(r.name)) legend.set(r.name, r.color);
+    }
+    cm.dispatch({
+      effects: setOverlay.of({
+        runs: oruns,
+        legend: [...legend].map(([label, color]) => ({ label, color })),
+        title: "Autoren",
+      }),
+    });
+    this.overlayMode = "authors";
+    this.overlaySinceT = null;
+    this.refreshRosters();
+  }
+
+  async showSinceOverlay(t: number): Promise<void> {
+    const path = this.activePath();
+    if (!path || !this.settings.serverUrl) {
+      new Notice("Live Presence: Keine aktive Notiz.");
+      return;
+    }
+    const versions = await listVersions(this.settings.serverUrl, this.effectiveAuth(), path);
+    const version = versions.find((v) => v.t === t);
+    const cm = this.activeCmView();
+    if (!version || !cm) {
+      new Notice("Live Presence: Version nicht gefunden.");
+      return;
+    }
+    const green = "#2ea043";
+    const runs = this.addedRanges(version.text, cm.state.doc.toString(), withAlpha(green, 0.3));
+    cm.dispatch({
+      effects: setOverlay.of({
+        runs,
+        legend: [{ label: `neu seit ${new Date(t).toLocaleString()}`, color: green }],
+        title: "Änderungen",
+      }),
+    });
+    this.overlayMode = "since";
+    this.overlaySinceT = t;
+    this.refreshRosters();
+  }
+
+  // Character ranges of lines present in the current text but not in the old one.
+  private addedRanges(oldText: string, newText: string, color: string): OverlayRun[] {
+    const lines = newText.split("\n");
+    const starts: number[] = [];
+    let off = 0;
+    for (const line of lines) {
+      starts.push(off);
+      off += line.length + 1;
+    }
+    const ops = diffLines(oldText, newText);
+    const runs: OverlayRun[] = [];
+    let j = 0;
+    for (const op of ops) {
+      if (op.type === "removed") continue;
+      if (op.type === "added") {
+        const from = starts[j];
+        const to = from + (lines[j]?.length ?? 0);
+        if (to > from) runs.push({ from, to, color, label: "neu" });
+      }
+      j++;
+    }
+    return runs;
+  }
+
+  private reapplyOverlayOnLeafChange(): void {
+    if (!this.overlayMode) return;
+    if (!this.activePath() || this.overlayMode === "since") {
+      this.clearOverlay();
+      return;
+    }
+    void this.applyAuthorsOverlay(true);
   }
 
   private showHistory(): void {

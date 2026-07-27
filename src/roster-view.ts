@@ -16,7 +16,10 @@ interface RosterCallbacks {
   loadVersions: (path: string) => Promise<VersionInfo[]>;
   onSaveVersion: () => Promise<void>;
   onOpenHistory: () => void;
-  onOpenBlame: () => void;
+  onToggleAuthors: () => void;
+  onShowSince: (t: number) => void;
+  onClearOverlay: () => void;
+  overlayInfo: () => { mode: "authors" | "since" | null; sinceT: number | null };
 }
 
 // Sidebar view: who is online (grouped by file) and, below it, the version
@@ -116,7 +119,7 @@ export class RosterView extends ItemView {
   }
 
   private renderVersions(root: HTMLElement): void {
-    root.createEl("h4", { text: "Versionen (aktuelle Notiz)", cls: "lp-section-top" });
+    root.createEl("h4", { text: "Versionen & Verlauf (aktuelle Notiz)", cls: "lp-section-top" });
 
     const path = this.cb.getActivePath();
     if (!path) {
@@ -125,8 +128,9 @@ export class RosterView extends ItemView {
     }
 
     const label = path.replace(/\.md$/, "").split("/").pop() ?? path;
-    const fileEl = root.createDiv({ cls: "lp-ver-file", text: label });
-    fileEl.setAttr("title", path);
+    root.createDiv({ cls: "lp-ver-file", text: label }).setAttr("title", path);
+
+    const info = this.cb.overlayInfo();
 
     const actions = root.createDiv({ cls: "lp-ver-actions" });
     const saveBtn = actions.createEl("button", { text: "Version merken" });
@@ -135,8 +139,20 @@ export class RosterView extends ItemView {
       await this.cb.onSaveVersion();
       await this.ensureVersions(true);
     });
-    actions.createEl("button", { text: "Verlauf" }).onClickEvent(() => this.cb.onOpenHistory());
-    actions.createEl("button", { text: "Autoren" }).onClickEvent(() => this.cb.onOpenBlame());
+    const authBtn = actions.createEl("button", {
+      text: info.mode === "authors" ? "Autoren im Text ✓" : "Autoren im Text",
+    });
+    if (info.mode === "authors") authBtn.addClass("lp-btn-active");
+    authBtn.onClickEvent(() => this.cb.onToggleAuthors());
+    actions.createEl("button", { text: "Verlauf (Fenster)" }).onClickEvent(() => this.cb.onOpenHistory());
+    if (info.mode) {
+      actions.createEl("button", { text: "Hervorhebung aus" }).onClickEvent(() => this.cb.onClearOverlay());
+    }
+
+    root.createDiv({
+      cls: "lp-ver-hint",
+      text: "Klicke eine Version an, um die Änderungen seither im Text zu markieren.",
+    });
 
     const list = root.createDiv({ cls: "lp-ver-list" });
     const items = this.versions && this.versions.path === path ? this.versions.items : null;
@@ -148,10 +164,16 @@ export class RosterView extends ItemView {
       list.createDiv({ cls: "lp-roster-empty", text: "Noch keine Versionen." });
       return;
     }
-    for (const v of items.slice(-5).reverse()) {
-      const row = list.createDiv({ cls: "lp-ver-item" });
+    for (const v of items.slice(-8).reverse()) {
+      const row = list.createDiv({ cls: "lp-ver-item lp-ver-clickable" });
+      if (info.mode === "since" && info.sinceT === v.t) row.addClass("lp-btn-active");
       row.createSpan({ cls: "lp-ver-when", text: new Date(v.t).toLocaleString() });
       if (v.by) row.createSpan({ cls: "lp-ver-by", text: v.by });
+      row.setAttr("title", "Änderungen seit dieser Version im Text markieren");
+      row.onClickEvent(() => {
+        if (info.mode === "since" && info.sinceT === v.t) this.cb.onClearOverlay();
+        else this.cb.onShowSince(v.t);
+      });
     }
   }
 }
