@@ -7,6 +7,7 @@ import {
   hashBytes,
   hashString,
   normalizeLineEndings,
+  registerAuthor,
   sleep,
 } from "../utils";
 import { blobExists, downloadBlob, uploadBlob } from "./blobs";
@@ -83,6 +84,7 @@ export class VaultSync {
     private serverUrl: string,
     private auth: Auth,
     private isCoEditing: (path: string) => boolean,
+    private getUser: () => { name: string; color: string },
     private log: (...args: unknown[]) => void,
   ) {}
 
@@ -301,6 +303,7 @@ export class VaultSync {
     try {
       const synced = await this.waitForSync(provider, SYNC_TIMEOUT);
       if (!synced || !this.running) return false;
+      registerAuthor(doc, this.getUser());
       applyMinimalYTextUpdate(doc, doc.getText("content"), content);
       await sleep(600); // allow the update to reach and be persisted by the server
       this.files.set(path, { k: "t", h: hash, t: Date.now() });
@@ -508,6 +511,7 @@ export class VaultSync {
       return;
     }
     const text = doc.getText("content");
+    registerAuthor(doc, this.getUser());
 
     const remote = text.toString();
     if (remote.length > 0 && this.localHashes.get(path) !== hashString(remote)) {

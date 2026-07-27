@@ -4,7 +4,14 @@ import { Notice } from "obsidian";
 import { yCollab } from "y-codemirror.next";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
-import { applyMinimalCmUpdate, applyMinimalYTextUpdate, normalizeLineEndings, sleep, withAlpha } from "../utils";
+import {
+  applyMinimalCmUpdate,
+  applyMinimalYTextUpdate,
+  normalizeLineEndings,
+  registerAuthor,
+  sleep,
+  withAlpha,
+} from "../utils";
 
 interface Auth {
   user: string;
@@ -72,6 +79,7 @@ export class CollabBinding {
         color: user.color,
         colorLight: withAlpha(user.color, 0.25),
       });
+      registerAuthor(doc, user);
 
       // Reconcile editor <-> shared text. CRITICAL: never clear a non-empty editor.
       const local = normalizeLineEndings(view.state.doc.toString());

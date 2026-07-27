@@ -80,6 +80,37 @@
   opacity: 1;
 }
 
+/* Autoren-/Blame-Ansicht */
+.lp-blame-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.lp-blame-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85em;
+}
+.lp-blame-dot {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+.lp-blame-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 10px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  font-family: var(--font-text, inherit);
+  line-height: 1.6;
+}
+
 /* Grüne Erfolgsmeldung beim Verbinden */
 .notice.lp-notice-success {
   background-color: var(--color-green, #2ea043);

@@ -68,6 +68,18 @@ export function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
 }
 
+// Record which display name/colour belongs to this document's client id, so a
+// blame view can later resolve who authored each run of text. The map lives in
+// the document itself, so it syncs and persists with the note.
+export function registerAuthor(doc: Y.Doc, user: { name: string; color: string }): void {
+  const authors = doc.getMap("authors");
+  const key = String(doc.clientID);
+  const existing = authors.get(key) as { name?: string } | undefined;
+  if (!existing || existing.name !== user.name) {
+    authors.set(key, { name: user.name, color: user.color });
+  }
+}
+
 // Fast, stable content hash (cyrb53) as a short hex string, used to detect changes.
 export function hashString(str: string): string {
   let h1 = 0xdeadbeef;

@@ -1,5 +1,6 @@
 import { EditorView } from "@codemirror/view";
 import { MarkdownView, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
+import { BlameModal } from "./blame-modal";
 import { CollabBinding } from "./collab/binding";
 import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
@@ -75,6 +76,12 @@ export default class LivePresencePlugin extends Plugin {
       id: "lp-presence-open-roster",
       name: "Roster öffnen (wer ist gerade im Vault)",
       callback: () => this.activateRoster(),
+    });
+    this.addRibbonIcon("history", "Live Presence: Autoren dieser Notiz", () => this.showBlame());
+    this.addCommand({
+      id: "lp-show-blame",
+      name: "Autoren dieser Notiz anzeigen (wer hat was geschrieben)",
+      callback: () => this.showBlame(),
     });
 
     this.app.workspace.onLayoutReady(() => {
@@ -252,6 +259,7 @@ export default class LivePresencePlugin extends Plugin {
       this.settings.serverUrl,
       this.effectiveAuth(),
       (path) => this.binding.isActive(path),
+      () => this.effectiveUser(),
       () => {}, // logging silenced for normal operation
     );
     void this.vaultSync.start();
@@ -383,6 +391,20 @@ export default class LivePresencePlugin extends Plugin {
       }
       cm.dispatch({ effects: setRemoteCursors.of(cursors) });
     }
+  }
+
+  private showBlame(): void {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const path = view?.file?.path;
+    if (!path) {
+      new Notice("Live Presence: Keine aktive Notiz.");
+      return;
+    }
+    if (!this.settings.serverUrl) {
+      new Notice("Live Presence: Bitte die Server-URL in den Einstellungen eintragen.");
+      return;
+    }
+    new BlameModal(this.app, this.settings.serverUrl, this.effectiveAuth(), path).open();
   }
 
   async activateRoster(): Promise<void> {
