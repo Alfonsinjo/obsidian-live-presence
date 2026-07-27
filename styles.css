@@ -80,6 +80,13 @@
   opacity: 1;
 }
 
+/* Grüne Erfolgsmeldung beim Verbinden */
+.notice.lp-notice-success {
+  background-color: var(--color-green, #2ea043);
+  color: #fff;
+  font-weight: 500;
+}
+
 /* Statusleiste */
 .lp-statusbar { cursor: pointer; }
 .lp-statusbar .lp-roster-dot { display: inline-block; margin-right: 4px; vertical-align: middle; }

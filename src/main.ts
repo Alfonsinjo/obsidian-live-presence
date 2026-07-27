@@ -216,7 +216,8 @@ export default class LivePresencePlugin extends Plugin {
         if (status === "connected") {
           settled = true;
           window.clearTimeout(timer);
-          if (withToast) new Notice("Live Presence: Verbunden.");
+          const n = new Notice("Erfolgreich mit Live Presence verbunden");
+          n.noticeEl.addClass("lp-notice-success");
         } else if (status === "error") {
           settled = true;
           window.clearTimeout(timer);
