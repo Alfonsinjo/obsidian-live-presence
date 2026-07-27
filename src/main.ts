@@ -199,36 +199,45 @@ export default class LivePresencePlugin extends Plugin {
     );
     this.presence.onChange(() => this.onPresenceChange());
 
-    // Always report a failed or absent connection (including on normal startup);
-    // only announce the attempt and success when the user connects manually.
+    // Report the connection outcome: a green success notice when connected (on
+    // startup as well as on manual connect), and a clear notice when the server
+    // cannot be reached. A short poll covers a status event we might have missed.
     {
       if (withToast) new Notice("Live Presence: Verbinde …");
       let settled = false;
-      const timer = window.setTimeout(() => {
+      const succeed = () => {
         if (settled) return;
         settled = true;
-        new Notice(
-          "Live Presence: Keine Verbindung zum Server (Zeitüberschreitung). Server-URL, Login und Netzwerk prüfen.",
-        );
-      }, 8000);
-      this.presence.onStatus((status) => {
+        window.clearTimeout(timer);
+        const n = new Notice("Erfolgreich mit Live Presence verbunden");
+        n.noticeEl.addClass("lp-notice-success");
+      };
+      const fail = (msg: string) => {
         if (settled) return;
-        if (status === "connected") {
-          settled = true;
-          window.clearTimeout(timer);
-          const n = new Notice("Erfolgreich mit Live Presence verbunden");
-          n.noticeEl.addClass("lp-notice-success");
-        } else if (status === "error") {
-          settled = true;
-          window.clearTimeout(timer);
-          new Notice(
+        settled = true;
+        window.clearTimeout(timer);
+        new Notice(msg);
+      };
+      const timer = window.setTimeout(
+        () =>
+          fail(
+            "Live Presence: Keine Verbindung zum Server (Zeitüberschreitung). Server-URL, Login und Netzwerk prüfen.",
+          ),
+        8000,
+      );
+      this.presence.onStatus((status) => {
+        if (status === "connected") succeed();
+        else if (status === "error")
+          fail(
             "Live Presence: Keine Verbindung zum Server. Login (Benutzer/Passwort), Server-URL und Netzwerk prüfen.",
           );
-        }
       });
+      this.presence.connect();
+      window.setTimeout(() => {
+        if (this.presence?.isConnected()) succeed();
+      }, 1500);
     }
 
-    this.presence.connect();
     this.updateActiveContext();
     this.restartVaultSync();
   }
