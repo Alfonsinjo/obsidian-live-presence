@@ -252,7 +252,7 @@ export default class LivePresencePlugin extends Plugin {
       this.settings.serverUrl,
       this.effectiveAuth(),
       (path) => this.binding.isActive(path),
-      (...args) => console.log("[VaultSync]", ...args),
+      () => {}, // logging silenced for normal operation
     );
     void this.vaultSync.start();
   }
