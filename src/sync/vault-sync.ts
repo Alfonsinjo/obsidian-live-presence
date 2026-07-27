@@ -10,6 +10,7 @@ import {
   registerAuthor,
   sleep,
 } from "../utils";
+import { saveVersion } from "../history";
 import { blobExists, downloadBlob, uploadBlob } from "./blobs";
 
 interface Auth {
@@ -32,6 +33,7 @@ interface IndexEntry {
 const INDEX_ROOM = "vault-index";
 const SYNC_TIMEOUT = 8000;
 const RECONCILE_INTERVAL = 60000;
+const VERSION_INTERVAL = 120000;
 
 const MIME: Record<string, string> = {
   pdf: "application/pdf",
@@ -71,6 +73,7 @@ export class VaultSync {
   private pushers = new Map<string, (path: string) => void>();
 
   private reconcileRunning = false;
+  private lastVersionAt = new Map<string, number>();
   private reconcileTimer: number | null = null;
   private interval: number | null = null;
   private onlineHandler = () => this.scheduleReconcile();
@@ -307,6 +310,7 @@ export class VaultSync {
       applyMinimalYTextUpdate(doc, doc.getText("content"), content);
       await sleep(600); // allow the update to reach and be persisted by the server
       this.files.set(path, { k: "t", h: hash, t: Date.now() });
+      this.recordVersion(path, content);
       this.log(`pushed text ${path} (${content.length} chars)`);
       return true;
     } finally {
@@ -526,6 +530,14 @@ export class VaultSync {
       void this.writeText(path, content);
     });
     this.log(`live doc connected for ${path}`);
+  }
+
+  // Store a full-text version in the history database, throttled per file.
+  private recordVersion(path: string, content: string): void {
+    const now = Date.now();
+    if (now - (this.lastVersionAt.get(path) ?? 0) < VERSION_INTERVAL) return;
+    this.lastVersionAt.set(path, now);
+    void saveVersion(this.serverUrl, this.auth, path, this.getUser().name, content);
   }
 
   private roomFor(path: string): string {

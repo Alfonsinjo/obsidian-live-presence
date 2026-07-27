@@ -111,6 +111,62 @@
   line-height: 1.6;
 }
 
+/* Verlauf-/Diff-Ansicht */
+.lp-history {
+  display: flex;
+  gap: 12px;
+  max-height: 65vh;
+}
+.lp-history-list {
+  flex: 0 0 220px;
+  overflow-y: auto;
+  border-right: 1px solid var(--background-modifier-border);
+  padding-right: 8px;
+}
+.lp-history-item {
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.lp-history-item:hover {
+  background: var(--background-modifier-hover);
+}
+.lp-history-item.is-active {
+  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+}
+.lp-history-when {
+  font-size: 0.85em;
+  font-weight: 500;
+}
+.lp-history-who {
+  font-size: 0.75em;
+  color: var(--text-muted);
+}
+.lp-history-detail {
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+.lp-history-heading {
+  font-size: 0.85em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+.lp-history-diff {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+  font-family: var(--font-text, inherit);
+}
+.lp-diff-added {
+  background: rgba(46, 160, 67, 0.28);
+  border-radius: 2px;
+}
+.lp-diff-removed {
+  background: rgba(248, 81, 73, 0.28);
+  text-decoration: line-through;
+  border-radius: 2px;
+}
+
 /* Grüne Erfolgsmeldung beim Verbinden */
 .notice.lp-notice-success {
   background-color: var(--color-green, #2ea043);

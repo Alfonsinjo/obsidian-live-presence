@@ -2,6 +2,8 @@ import { EditorView } from "@codemirror/view";
 import { MarkdownView, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
 import { BlameModal } from "./blame-modal";
 import { CollabBinding } from "./collab/binding";
+import { saveVersion as storeVersion } from "./history";
+import { HistoryModal } from "./history-modal";
 import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
 import { fetchProfileName, saveProfileName } from "./profile";
@@ -10,7 +12,7 @@ import { ROSTER_VIEW_TYPE, RosterView } from "./roster-view";
 import { LivePresenceSettingTab } from "./settings";
 import { VaultSync } from "./sync/vault-sync";
 import { DEFAULT_SETTINGS, type LivePresenceSettings } from "./types";
-import { colorFromName, debounce } from "./utils";
+import { colorFromName, debounce, normalizeLineEndings } from "./utils";
 
 // Obsidian exposes the underlying CodeMirror 6 view as editor.cm (undocumented but stable).
 function getCmView(view: MarkdownView): EditorView | undefined {
@@ -82,6 +84,17 @@ export default class LivePresencePlugin extends Plugin {
       id: "lp-show-blame",
       name: "Autoren dieser Notiz anzeigen (wer hat was geschrieben)",
       callback: () => this.showBlame(),
+    });
+    this.addRibbonIcon("git-compare", "Live Presence: Verlauf dieser Notiz", () => this.showHistory());
+    this.addCommand({
+      id: "lp-show-history",
+      name: "Verlauf dieser Notiz anzeigen (Versionen und Änderungen)",
+      callback: () => this.showHistory(),
+    });
+    this.addCommand({
+      id: "lp-save-version",
+      name: "Version dieser Notiz merken",
+      callback: () => this.saveVersion(),
     });
 
     this.app.workspace.onLayoutReady(() => {
@@ -405,6 +418,41 @@ export default class LivePresencePlugin extends Plugin {
       return;
     }
     new BlameModal(this.app, this.settings.serverUrl, this.effectiveAuth(), path).open();
+  }
+
+  private activePath(): string | null {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    return view?.file?.path ?? null;
+  }
+
+  private showHistory(): void {
+    const path = this.activePath();
+    if (!path) {
+      new Notice("Live Presence: Keine aktive Notiz.");
+      return;
+    }
+    if (!this.settings.serverUrl) {
+      new Notice("Live Presence: Bitte die Server-URL in den Einstellungen eintragen.");
+      return;
+    }
+    new HistoryModal(this.app, this.settings.serverUrl, this.effectiveAuth(), path).open();
+  }
+
+  private async saveVersion(): Promise<void> {
+    const file = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
+    if (!file || !this.settings.serverUrl) {
+      new Notice("Live Presence: Keine aktive Notiz oder Server-URL fehlt.");
+      return;
+    }
+    const text = normalizeLineEndings(await this.app.vault.read(file));
+    const ok = await storeVersion(
+      this.settings.serverUrl,
+      this.effectiveAuth(),
+      file.path,
+      this.effectiveUser().name,
+      text,
+    );
+    new Notice(ok ? "Live Presence: Version gemerkt." : "Live Presence: Version konnte nicht gespeichert werden.");
   }
 
   async activateRoster(): Promise<void> {
