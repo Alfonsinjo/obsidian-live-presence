@@ -449,9 +449,16 @@ export default class LivePresencePlugin extends Plugin {
     return versions.map((v) => ({ t: v.t, by: v.by }));
   }
 
+  // Editor of the current note, found by file rather than focus, so it also
+  // works when a sidebar (roster) currently holds the focus.
   private activeCmView(): EditorView | undefined {
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    return view ? getCmView(view) : undefined;
+    const path = this.activePath();
+    if (!path) return undefined;
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const view = leaf.view as MarkdownView;
+      if (view.file?.path === path) return getCmView(view);
+    }
+    return undefined;
   }
 
   private refreshRosters(): void {
