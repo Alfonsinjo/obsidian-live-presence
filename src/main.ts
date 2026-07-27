@@ -78,7 +78,7 @@ export default class LivePresencePlugin extends Plugin {
     });
 
     this.app.workspace.onLayoutReady(() => {
-      void this.startPresence(false);
+      void this.startPresence();
     });
 
     this.registerEvent(this.app.workspace.on("file-open", () => this.updateActiveContext()));
@@ -185,7 +185,7 @@ export default class LivePresencePlugin extends Plugin {
 
   // Connect to the presence server. Resolves the display name from the profile
   // database first (asking for it once if it is not set yet).
-  private async startPresence(withToast: boolean): Promise<void> {
+  private async startPresence(): Promise<void> {
     this.presence?.destroy();
     if (!this.settings.serverUrl) {
       new Notice("Live Presence: Bitte die Server-URL in den Einstellungen eintragen.");
@@ -203,7 +203,7 @@ export default class LivePresencePlugin extends Plugin {
     // startup as well as on manual connect), and a clear notice when the server
     // cannot be reached. A short poll covers a status event we might have missed.
     {
-      if (withToast) new Notice("Live Presence: Verbinde …");
+      new Notice("Live Presence: Versuche Verbindung zur Datenbank aufzubauen …");
       let settled = false;
       const succeed = () => {
         if (settled) return;
@@ -398,7 +398,7 @@ export default class LivePresencePlugin extends Plugin {
   }
 
   reconnect(): void {
-    void this.startPresence(true);
+    void this.startPresence();
   }
 
   async loadSettings(): Promise<void> {
