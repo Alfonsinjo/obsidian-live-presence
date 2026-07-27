@@ -1,8 +1,8 @@
 import { EditorView } from "@codemirror/view";
-import { MarkdownView, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
+import { MarkdownView, Notice, Plugin, TFile, type WorkspaceLeaf } from "obsidian";
 import { BlameModal } from "./blame-modal";
 import { CollabBinding } from "./collab/binding";
-import { saveVersion as storeVersion } from "./history";
+import { listVersions, saveVersion as storeVersion } from "./history";
 import { HistoryModal } from "./history-modal";
 import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
@@ -51,12 +51,16 @@ export default class LivePresencePlugin extends Plugin {
     this.registerView(
       ROSTER_VIEW_TYPE,
       (leaf) =>
-        new RosterView(
-          leaf,
-          () => this.presence.getAll(),
-          () => this.presence.clientId,
-          (path) => this.app.workspace.openLinkText(path, "", false),
-        ),
+        new RosterView(leaf, {
+          getEntries: () => this.presence.getAll(),
+          getSelfId: () => this.presence.clientId,
+          onOpenFile: (path) => this.app.workspace.openLinkText(path, "", false),
+          getActivePath: () => this.activePath(),
+          loadVersions: (path) => this.loadVersions(path),
+          onSaveVersion: () => this.saveVersion(),
+          onOpenHistory: () => this.showHistory(),
+          onOpenBlame: () => this.showBlame(),
+        }),
     );
 
     this.statusBarEl = this.addStatusBarItem();
@@ -407,8 +411,7 @@ export default class LivePresencePlugin extends Plugin {
   }
 
   private showBlame(): void {
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    const path = view?.file?.path;
+    const path = this.activePath();
     if (!path) {
       new Notice("Live Presence: Keine aktive Notiz.");
       return;
@@ -420,9 +423,16 @@ export default class LivePresencePlugin extends Plugin {
     new BlameModal(this.app, this.settings.serverUrl, this.effectiveAuth(), path).open();
   }
 
+  // Path of the current note (Markdown only), even when a sidebar has focus.
   private activePath(): string | null {
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    return view?.file?.path ?? null;
+    const file = this.app.workspace.getActiveFile();
+    return file && file.extension === "md" ? file.path : null;
+  }
+
+  private async loadVersions(path: string): Promise<{ t: number; by: string }[]> {
+    if (!this.settings.serverUrl) return [];
+    const versions = await listVersions(this.settings.serverUrl, this.effectiveAuth(), path);
+    return versions.map((v) => ({ t: v.t, by: v.by }));
   }
 
   private showHistory(): void {
@@ -439,8 +449,9 @@ export default class LivePresencePlugin extends Plugin {
   }
 
   private async saveVersion(): Promise<void> {
-    const file = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
-    if (!file || !this.settings.serverUrl) {
+    const path = this.activePath();
+    const file = path ? this.app.vault.getAbstractFileByPath(path) : null;
+    if (!(file instanceof TFile) || !this.settings.serverUrl) {
       new Notice("Live Presence: Keine aktive Notiz oder Server-URL fehlt.");
       return;
     }

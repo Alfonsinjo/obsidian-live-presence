@@ -3,14 +3,30 @@ import type { RemoteEntry } from "./types";
 
 export const ROSTER_VIEW_TYPE = "live-presence-roster";
 
-// Sidebar view listing who is online, grouped by file.
-// Data and callbacks are provided by the plugin.
+interface VersionInfo {
+  t: number;
+  by: string;
+}
+
+interface RosterCallbacks {
+  getEntries: () => RemoteEntry[];
+  getSelfId: () => number;
+  onOpenFile: (path: string) => void;
+  getActivePath: () => string | null;
+  loadVersions: (path: string) => Promise<VersionInfo[]>;
+  onSaveVersion: () => Promise<void>;
+  onOpenHistory: () => void;
+  onOpenBlame: () => void;
+}
+
+// Sidebar view: who is online (grouped by file) and, below it, the version
+// history of the currently open note with quick actions.
 export class RosterView extends ItemView {
+  private versions: { path: string | null; items: VersionInfo[] } | null = null;
+
   constructor(
     leaf: WorkspaceLeaf,
-    private getEntries: () => RemoteEntry[],
-    private getSelfId: () => number,
-    private onOpenFile: (path: string) => void,
+    private cb: RosterCallbacks,
   ) {
     super(leaf);
   }
@@ -27,9 +43,21 @@ export class RosterView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.render();
+    void this.ensureVersions(false);
   }
 
   refresh(): void {
+    this.render();
+    void this.ensureVersions(false);
+  }
+
+  // Reload the version list only when the active note changed (or when forced),
+  // so frequent presence updates do not hit the server repeatedly.
+  private async ensureVersions(force: boolean): Promise<void> {
+    const path = this.cb.getActivePath();
+    if (!force && this.versions?.path === path) return;
+    const items = path ? await this.cb.loadVersions(path) : [];
+    this.versions = { path, items };
     this.render();
   }
 
@@ -37,16 +65,21 @@ export class RosterView extends ItemView {
     const root = this.contentEl;
     root.empty();
     root.addClass("lp-roster");
+
+    this.renderPresence(root);
+    this.renderVersions(root);
+  }
+
+  private renderPresence(root: HTMLElement): void {
     root.createEl("h4", { text: "Gerade im Vault" });
 
-    const entries = this.getEntries();
+    const entries = this.cb.getEntries();
     if (entries.length === 0) {
       root.createDiv({ cls: "lp-roster-empty", text: "Niemand online." });
       return;
     }
 
-    const selfId = this.getSelfId();
-
+    const selfId = this.cb.getSelfId();
     const byFile = new Map<string | null, RemoteEntry[]>();
     for (const e of entries) {
       const key = e.state.file ?? null;
@@ -55,7 +88,6 @@ export class RosterView extends ItemView {
       else byFile.set(key, [e]);
     }
 
-    // Real files first (alphabetical), then the "no file" group.
     const files = Array.from(byFile.keys()).sort((a, b) => {
       if (a === null) return 1;
       if (b === null) return -1;
@@ -70,7 +102,7 @@ export class RosterView extends ItemView {
         const label = file.replace(/\.md$/, "").split("/").pop() ?? file;
         const fileEl = root.createDiv({ cls: "lp-roster-file", text: label });
         fileEl.setAttr("title", file);
-        fileEl.onClickEvent(() => this.onOpenFile(file));
+        fileEl.onClickEvent(() => this.cb.onOpenFile(file));
       }
       for (const e of users) {
         const row = root.createDiv({ cls: "lp-roster-user" });
@@ -80,6 +112,46 @@ export class RosterView extends ItemView {
         const name = e.state.user.name || "Anonym";
         row.createSpan({ text: e.clientId === selfId ? `${name} (du)` : name });
       }
+    }
+  }
+
+  private renderVersions(root: HTMLElement): void {
+    root.createEl("h4", { text: "Versionen (aktuelle Notiz)", cls: "lp-section-top" });
+
+    const path = this.cb.getActivePath();
+    if (!path) {
+      root.createDiv({ cls: "lp-roster-empty", text: "Keine Notiz geöffnet." });
+      return;
+    }
+
+    const label = path.replace(/\.md$/, "").split("/").pop() ?? path;
+    const fileEl = root.createDiv({ cls: "lp-ver-file", text: label });
+    fileEl.setAttr("title", path);
+
+    const actions = root.createDiv({ cls: "lp-ver-actions" });
+    const saveBtn = actions.createEl("button", { text: "Version merken" });
+    saveBtn.onClickEvent(async () => {
+      saveBtn.setAttr("disabled", "true");
+      await this.cb.onSaveVersion();
+      await this.ensureVersions(true);
+    });
+    actions.createEl("button", { text: "Verlauf" }).onClickEvent(() => this.cb.onOpenHistory());
+    actions.createEl("button", { text: "Autoren" }).onClickEvent(() => this.cb.onOpenBlame());
+
+    const list = root.createDiv({ cls: "lp-ver-list" });
+    const items = this.versions && this.versions.path === path ? this.versions.items : null;
+    if (items === null) {
+      list.createDiv({ cls: "lp-roster-empty", text: "Lade …" });
+      return;
+    }
+    if (items.length === 0) {
+      list.createDiv({ cls: "lp-roster-empty", text: "Noch keine Versionen." });
+      return;
+    }
+    for (const v of items.slice(-5).reverse()) {
+      const row = list.createDiv({ cls: "lp-ver-item" });
+      row.createSpan({ cls: "lp-ver-when", text: new Date(v.t).toLocaleString() });
+      if (v.by) row.createSpan({ cls: "lp-ver-by", text: v.by });
     }
   }
 }
