@@ -255,6 +255,33 @@
   border-radius: 50%;
 }
 
+/* Eingebettete Wiedergabe in der Seitenleiste */
+.lp-ver-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 0 8px;
+}
+.lp-icon-btn {
+  cursor: pointer;
+}
+.lp-pb {
+  margin-top: 6px;
+}
+.lp-pb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lp-pb-label {
+  font-size: 0.75em;
+  color: var(--text-muted);
+}
+.lp-pb-slider {
+  width: 100%;
+  margin-top: 6px;
+}
+
 /* Wiedergabe / Zeit-Schieberegler */
 .lp-playback-controls {
   display: flex;

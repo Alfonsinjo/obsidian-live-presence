@@ -1,12 +1,12 @@
 import { EditorView } from "@codemirror/view";
-import { MarkdownView, Notice, Plugin, TFile, type WorkspaceLeaf } from "obsidian";
+import { MarkdownView, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
 import { readAuthorRuns } from "./blame";
 import { BlameModal } from "./blame-modal";
+import { type Frame, buildFrames, listChangelog } from "./changelog";
 import { CollabBinding } from "./collab/binding";
-import { diffLines, listVersions, saveVersion as storeVersion } from "./history";
+import { diffLines } from "./history";
 import { SessionTimelineModal } from "./session-modal";
 import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
-import { PlaybackModal } from "./playback-modal";
 import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
 import { fetchProfileName, saveProfileName } from "./profile";
@@ -15,7 +15,7 @@ import { ROSTER_VIEW_TYPE, RosterView } from "./roster-view";
 import { LivePresenceSettingTab } from "./settings";
 import { VaultSync } from "./sync/vault-sync";
 import { DEFAULT_SETTINGS, type LivePresenceSettings } from "./types";
-import { colorFromName, debounce, normalizeLineEndings, withAlpha } from "./utils";
+import { colorFromName, debounce, sleep, withAlpha } from "./utils";
 
 // Obsidian exposes the underlying CodeMirror 6 view as editor.cm (undocumented but stable).
 function getCmView(view: MarkdownView): EditorView | undefined {
@@ -35,8 +35,9 @@ export default class LivePresencePlugin extends Plugin {
   // Full name resolved from the profile database.
   private displayName = "";
   // In-editor history overlay state.
-  private overlayMode: "authors" | "since" | null = null;
-  private overlaySinceT: number | null = null;
+  private overlayMode: "authors" | "asof" | null = null;
+  // Cached reconstructed frames of the current note, for the timeline scrubber.
+  private framesCache: { path: string; frames: Frame[] } | null = null;
 
   private reportCursor = debounce((anchor: number, head: number, docLen: number) => {
     this.presence?.setCursor({ anchor, head, docLen });
@@ -62,14 +63,12 @@ export default class LivePresencePlugin extends Plugin {
           getSelfId: () => this.presence.clientId,
           onOpenFile: (path) => this.app.workspace.openLinkText(path, "", false),
           getActivePath: () => this.activePath(),
-          loadVersions: (path) => this.loadVersions(path),
-          onSaveVersion: () => this.saveVersion(),
           onOpenHistory: () => this.showHistory(),
-          onOpenPlayback: () => this.showPlayback(),
           onToggleAuthors: () => void this.toggleAuthorsOverlay(),
-          onShowSince: (t) => void this.showSinceOverlay(t),
           onClearOverlay: () => this.clearOverlay(),
           overlayInfo: () => this.overlayInfo(),
+          loadFrames: (path) => this.loadFrames(path),
+          onScrubTo: (index) => this.showAsOfOverlay(index),
         }),
     );
 
@@ -109,16 +108,6 @@ export default class LivePresencePlugin extends Plugin {
       id: "lp-show-history",
       name: "Verlauf dieser Notiz anzeigen (Versionen und Änderungen)",
       callback: () => this.showHistory(),
-    });
-    this.addCommand({
-      id: "lp-save-version",
-      name: "Version dieser Notiz merken",
-      callback: () => this.saveVersion(),
-    });
-    this.addCommand({
-      id: "lp-playback",
-      name: "Wiedergabe dieser Notiz (Verlauf über die Zeit)",
-      callback: () => this.showPlayback(),
     });
 
     this.app.workspace.onLayoutReady(() => {
@@ -450,10 +439,17 @@ export default class LivePresencePlugin extends Plugin {
     return file && file.extension === "md" ? file.path : null;
   }
 
-  private async loadVersions(path: string): Promise<{ t: number; by: string }[]> {
-    if (!this.settings.serverUrl) return [];
-    const versions = await listVersions(this.settings.serverUrl, this.effectiveAuth(), path);
-    return versions.map((v) => ({ t: v.t, by: v.by }));
+  // Load and cache the reconstructed timeline frames for a note; returns the
+  // timestamp of each frame for the sidebar scrubber labels.
+  private async loadFrames(path: string): Promise<number[]> {
+    if (!this.settings.serverUrl) {
+      this.framesCache = null;
+      return [];
+    }
+    const entries = await listChangelog(this.settings.serverUrl, this.effectiveAuth(), path);
+    const frames = buildFrames(entries);
+    this.framesCache = { path, frames };
+    return frames.map((f) => f.t);
   }
 
   // Editor of the current note, found by file rather than focus, so it also
@@ -470,18 +466,17 @@ export default class LivePresencePlugin extends Plugin {
 
   private refreshRosters(): void {
     for (const leaf of this.app.workspace.getLeavesOfType(ROSTER_VIEW_TYPE)) {
-      if (leaf.view instanceof RosterView) leaf.view.refresh();
+      if (leaf.view instanceof RosterView) leaf.view.refreshVersions();
     }
   }
 
-  overlayInfo(): { mode: "authors" | "since" | null; sinceT: number | null } {
-    return { mode: this.overlayMode, sinceT: this.overlaySinceT };
+  overlayInfo(): { mode: "authors" | "asof" | null } {
+    return { mode: this.overlayMode };
   }
 
   clearOverlay(): void {
     this.activeCmView()?.dispatch({ effects: setOverlay.of(null) });
     this.overlayMode = null;
-    this.overlaySinceT = null;
     this.refreshRosters();
   }
 
@@ -499,15 +494,27 @@ export default class LivePresencePlugin extends Plugin {
       if (!silent) new Notice("Live Presence: Keine aktive Notiz.");
       return;
     }
-    const runs = await readAuthorRuns(this.settings.serverUrl, this.effectiveAuth(), path);
-    if (!runs) {
-      if (!silent) new Notice("Live Presence: Nicht mit dem Server verbunden.");
+    const cm = this.activeCmView();
+    if (!cm) {
+      if (!silent) new Notice("Live Presence: Keine aktive Notiz.");
       return;
     }
-    const cm = this.activeCmView();
-    const total = runs.reduce((n, r) => n + r.text.length, 0);
-    if (!cm || total !== cm.state.doc.length) {
-      if (!silent) new Notice("Live Presence: Text noch nicht synchron – kurz warten und erneut versuchen.");
+    // The authorship comes from the shared document; align it to the editor by
+    // length. Retry once in case the document is still catching up.
+    let runs = null as Awaited<ReturnType<typeof readAuthorRuns>>;
+    let aligned = false;
+    for (let attempt = 0; attempt < 2 && !aligned; attempt++) {
+      if (attempt > 0) await sleep(700);
+      runs = await readAuthorRuns(this.settings.serverUrl, this.effectiveAuth(), path);
+      if (!runs) {
+        if (!silent) new Notice("Live Presence: Nicht mit dem Server verbunden.");
+        return;
+      }
+      const total = runs.reduce((n, r) => n + r.text.length, 0);
+      aligned = total === cm.state.doc.length;
+    }
+    if (!runs || !aligned) {
+      if (!silent) new Notice("Live Presence: Autoren konnten nicht zugeordnet werden (Text nicht synchron).");
       return;
     }
     let pos = 0;
@@ -528,35 +535,31 @@ export default class LivePresencePlugin extends Plugin {
       }),
     });
     this.overlayMode = "authors";
-    this.overlaySinceT = null;
     this.refreshRosters();
   }
 
-  async showSinceOverlay(t: number): Promise<void> {
-    const path = this.activePath();
-    if (!path || !this.settings.serverUrl) {
-      new Notice("Live Presence: Keine aktive Notiz.");
-      return;
-    }
-    const versions = await listVersions(this.settings.serverUrl, this.effectiveAuth(), path);
-    const version = versions.find((v) => v.t === t);
+  // Highlight (green) the lines added since the frame at the given index, i.e.
+  // show the document "as of" that time. Driven by the sidebar scrubber, so it
+  // does not re-render the sidebar (that would fight with dragging the slider).
+  showAsOfOverlay(index: number): void {
     const cm = this.activeCmView();
-    if (!version || !cm) {
-      new Notice("Live Presence: Version nicht gefunden.");
+    const frames = this.framesCache?.frames;
+    if (!cm || !frames || index < 0 || index >= frames.length) return;
+    if (index >= frames.length - 1) {
+      cm.dispatch({ effects: setOverlay.of(null) }); // "now": nothing is newer
+      this.overlayMode = null;
       return;
     }
     const green = "#2ea043";
-    const runs = this.addedRanges(version.text, cm.state.doc.toString(), withAlpha(green, 0.3));
+    const runs = this.addedRanges(frames[index].text, cm.state.doc.toString(), withAlpha(green, 0.3));
     cm.dispatch({
       effects: setOverlay.of({
         runs,
-        legend: [{ label: `neu seit ${new Date(t).toLocaleString()}`, color: green }],
+        legend: [{ label: `neu seit ${new Date(frames[index].t).toLocaleString()}`, color: green }],
         title: "Änderungen",
       }),
     });
-    this.overlayMode = "since";
-    this.overlaySinceT = t;
-    this.refreshRosters();
+    this.overlayMode = "asof";
   }
 
   // Character ranges of lines present in the current text but not in the old one.
@@ -584,8 +587,9 @@ export default class LivePresencePlugin extends Plugin {
   }
 
   private reapplyOverlayOnLeafChange(): void {
+    this.framesCache = null; // frames are per note
     if (!this.overlayMode) return;
-    if (!this.activePath() || this.overlayMode === "since") {
+    if (!this.activePath() || this.overlayMode === "asof") {
       this.clearOverlay();
       return;
     }
@@ -603,33 +607,6 @@ export default class LivePresencePlugin extends Plugin {
       return;
     }
     new SessionTimelineModal(this.app, this.settings.serverUrl, this.effectiveAuth(), path).open();
-  }
-
-  private showPlayback(): void {
-    const path = this.activePath();
-    if (!path || !this.settings.serverUrl) {
-      new Notice("Live Presence: Keine aktive Notiz oder Server-URL fehlt.");
-      return;
-    }
-    new PlaybackModal(this.app, this.settings.serverUrl, this.effectiveAuth(), path).open();
-  }
-
-  private async saveVersion(): Promise<void> {
-    const path = this.activePath();
-    const file = path ? this.app.vault.getAbstractFileByPath(path) : null;
-    if (!(file instanceof TFile) || !this.settings.serverUrl) {
-      new Notice("Live Presence: Keine aktive Notiz oder Server-URL fehlt.");
-      return;
-    }
-    const text = normalizeLineEndings(await this.app.vault.read(file));
-    const ok = await storeVersion(
-      this.settings.serverUrl,
-      this.effectiveAuth(),
-      file.path,
-      this.effectiveUser().name,
-      text,
-    );
-    new Notice(ok ? "Live Presence: Version gemerkt." : "Live Presence: Version konnte nicht gespeichert werden.");
   }
 
   async activateRoster(): Promise<void> {

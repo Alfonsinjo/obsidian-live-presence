@@ -1,32 +1,29 @@
-import { ItemView, type WorkspaceLeaf } from "obsidian";
+import { ItemView, type WorkspaceLeaf, setIcon } from "obsidian";
 import type { RemoteEntry } from "./types";
 
 export const ROSTER_VIEW_TYPE = "live-presence-roster";
-
-interface VersionInfo {
-  t: number;
-  by: string;
-}
 
 interface RosterCallbacks {
   getEntries: () => RemoteEntry[];
   getSelfId: () => number;
   onOpenFile: (path: string) => void;
   getActivePath: () => string | null;
-  loadVersions: (path: string) => Promise<VersionInfo[]>;
-  onSaveVersion: () => Promise<void>;
   onOpenHistory: () => void;
-  onOpenPlayback: () => void;
   onToggleAuthors: () => void;
-  onShowSince: (t: number) => void;
   onClearOverlay: () => void;
-  overlayInfo: () => { mode: "authors" | "since" | null; sinceT: number | null };
+  overlayInfo: () => { mode: "authors" | "asof" | null };
+  loadFrames: (path: string) => Promise<number[]>;
+  onScrubTo: (index: number) => void;
 }
 
-// Sidebar view: who is online (grouped by file) and, below it, the version
-// history of the currently open note with quick actions.
+// Sidebar view: who is online (grouped by file), and below it the version
+// controls for the current note (author highlight, history, and a playback
+// scrubber over the recorded timeline).
 export class RosterView extends ItemView {
-  private versions: { path: string | null; items: VersionInfo[] } | null = null;
+  private presenceEl!: HTMLElement;
+  private versionEl!: HTMLElement;
+  private frames: { path: string | null; times: number[] } | null = null;
+  private playTimer: number | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -46,35 +43,53 @@ export class RosterView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
-    this.render();
-    void this.ensureVersions(false);
+    this.contentEl.addClass("lp-roster");
+    this.presenceEl = this.contentEl.createDiv();
+    this.versionEl = this.contentEl.createDiv();
+    this.renderPresence();
+    this.renderVersions();
+    void this.ensureFrames(false);
   }
 
+  // Presence updates only re-render the presence section, so they never disturb
+  // the playback scrubber below.
   refresh(): void {
-    this.render();
-    void this.ensureVersions(false);
+    this.renderPresence();
+    void this.ensureFrames(false);
   }
 
-  // Reload the version list only when the active note changed (or when forced),
-  // so frequent presence updates do not hit the server repeatedly.
-  private async ensureVersions(force: boolean): Promise<void> {
+  // Called when the version/overlay state changed deliberately (button click).
+  refreshVersions(): void {
+    this.renderVersions();
+  }
+
+  private stopPlay(): void {
+    if (this.playTimer !== null) {
+      window.clearInterval(this.playTimer);
+      this.playTimer = null;
+    }
+  }
+
+  private async ensureFrames(force: boolean): Promise<void> {
     const path = this.cb.getActivePath();
-    if (!force && this.versions?.path === path) return;
-    const items = path ? await this.cb.loadVersions(path) : [];
-    this.versions = { path, items };
-    this.render();
+    if (!force && this.frames?.path === path) return;
+    const times = path ? await this.cb.loadFrames(path) : [];
+    this.frames = { path, times };
+    this.renderVersions();
   }
 
-  private render(): void {
-    const root = this.contentEl;
+  private iconButton(parent: HTMLElement, icon: string, label: string, active: boolean): HTMLElement {
+    const btn = parent.createEl("button", { cls: "clickable-icon lp-icon-btn" });
+    setIcon(btn, icon);
+    btn.setAttribute("aria-label", label);
+    btn.setAttribute("title", label);
+    if (active) btn.addClass("lp-btn-active");
+    return btn;
+  }
+
+  private renderPresence(): void {
+    const root = this.presenceEl;
     root.empty();
-    root.addClass("lp-roster");
-
-    this.renderPresence(root);
-    this.renderVersions(root);
-  }
-
-  private renderPresence(root: HTMLElement): void {
     root.createEl("h4", { text: "Gerade im Vault" });
 
     const entries = this.cb.getEntries();
@@ -119,8 +134,11 @@ export class RosterView extends ItemView {
     }
   }
 
-  private renderVersions(root: HTMLElement): void {
-    root.createEl("h4", { text: "Versionen & Verlauf (aktuelle Notiz)", cls: "lp-section-top" });
+  private renderVersions(): void {
+    const root = this.versionEl;
+    this.stopPlay();
+    root.empty();
+    root.createEl("h4", { text: "Verlauf (aktuelle Notiz)", cls: "lp-section-top" });
 
     const path = this.cb.getActivePath();
     if (!path) {
@@ -132,50 +150,82 @@ export class RosterView extends ItemView {
     root.createDiv({ cls: "lp-ver-file", text: label }).setAttr("title", path);
 
     const info = this.cb.overlayInfo();
-
     const actions = root.createDiv({ cls: "lp-ver-actions" });
-    const saveBtn = actions.createEl("button", { text: "Version merken" });
-    saveBtn.onClickEvent(async () => {
-      saveBtn.setAttr("disabled", "true");
-      await this.cb.onSaveVersion();
-      await this.ensureVersions(true);
-    });
-    const authBtn = actions.createEl("button", {
-      text: info.mode === "authors" ? "Autoren im Text ✓" : "Autoren im Text",
-    });
-    if (info.mode === "authors") authBtn.addClass("lp-btn-active");
-    authBtn.onClickEvent(() => this.cb.onToggleAuthors());
-    actions.createEl("button", { text: "Verlauf" }).onClickEvent(() => this.cb.onOpenHistory());
-    actions.createEl("button", { text: "Wiedergabe" }).onClickEvent(() => this.cb.onOpenPlayback());
+    this.iconButton(actions, "users", "Autoren im Text hervorheben", info.mode === "authors").onClickEvent(
+      () => this.cb.onToggleAuthors(),
+    );
+    this.iconButton(actions, "history", "Verlauf (Sitzungen) öffnen", false).onClickEvent(() =>
+      this.cb.onOpenHistory(),
+    );
     if (info.mode) {
-      actions.createEl("button", { text: "Hervorhebung aus" }).onClickEvent(() => this.cb.onClearOverlay());
+      this.iconButton(actions, "eye-off", "Hervorhebung im Text ausschalten", false).onClickEvent(() =>
+        this.cb.onClearOverlay(),
+      );
     }
 
-    root.createDiv({
-      cls: "lp-ver-hint",
-      text: "Klicke eine Version an, um die Änderungen seither im Text zu markieren.",
+    const times = this.frames && this.frames.path === path ? this.frames.times : null;
+    if (times === null) {
+      root.createDiv({ cls: "lp-roster-empty", text: "Lade Verlauf …" });
+      return;
+    }
+    if (times.length <= 1) {
+      root.createDiv({ cls: "lp-roster-empty", text: "Noch kein aufgezeichneter Verlauf." });
+      return;
+    }
+
+    const max = times.length - 1;
+    const pb = root.createDiv({ cls: "lp-pb" });
+    const row = pb.createDiv({ cls: "lp-pb-row" });
+    const playBtn = this.iconButton(row, "play", "Verlauf abspielen", false);
+    const timeLabel = row.createSpan({ cls: "lp-pb-label" });
+
+    const slider = pb.createEl("input", { cls: "lp-pb-slider" });
+    slider.type = "range";
+    slider.min = "0";
+    slider.max = String(max);
+    slider.value = String(max);
+
+    const setLabel = (i: number) =>
+      timeLabel.setText(i >= max ? "aktueller Stand" : `Stand: ${new Date(times[i]).toLocaleString()}`);
+
+    slider.oninput = () => {
+      this.stopPlay();
+      setIcon(playBtn, "play");
+      const i = Number(slider.value);
+      setLabel(i);
+      this.cb.onScrubTo(i);
+    };
+
+    playBtn.onClickEvent(() => {
+      if (this.playTimer !== null) {
+        this.stopPlay();
+        setIcon(playBtn, "play");
+        return;
+      }
+      if (Number(slider.value) >= max) {
+        slider.value = "0";
+        setLabel(0);
+        this.cb.onScrubTo(0);
+      }
+      setIcon(playBtn, "pause");
+      this.playTimer = window.setInterval(() => {
+        let v = Number(slider.value);
+        if (v >= max) {
+          this.stopPlay();
+          setIcon(playBtn, "play");
+          return;
+        }
+        v += 1;
+        slider.value = String(v);
+        setLabel(v);
+        this.cb.onScrubTo(v);
+      }, 700);
     });
 
-    const list = root.createDiv({ cls: "lp-ver-list" });
-    const items = this.versions && this.versions.path === path ? this.versions.items : null;
-    if (items === null) {
-      list.createDiv({ cls: "lp-roster-empty", text: "Lade …" });
-      return;
-    }
-    if (items.length === 0) {
-      list.createDiv({ cls: "lp-roster-empty", text: "Noch keine Versionen." });
-      return;
-    }
-    for (const v of items.slice(-8).reverse()) {
-      const row = list.createDiv({ cls: "lp-ver-item lp-ver-clickable" });
-      if (info.mode === "since" && info.sinceT === v.t) row.addClass("lp-btn-active");
-      row.createSpan({ cls: "lp-ver-when", text: new Date(v.t).toLocaleString() });
-      if (v.by) row.createSpan({ cls: "lp-ver-by", text: v.by });
-      row.setAttr("title", "Änderungen seit dieser Version im Text markieren");
-      row.onClickEvent(() => {
-        if (info.mode === "since" && info.sinceT === v.t) this.cb.onClearOverlay();
-        else this.cb.onShowSince(v.t);
-      });
-    }
+    setLabel(max);
+  }
+
+  async onClose(): Promise<void> {
+    this.stopPlay();
   }
 }
