@@ -80,6 +80,11 @@
   opacity: 1;
 }
 
+/* Ausgegrauter Text (später hinzugefügt) beim Zurückspulen */
+.lp-faded {
+  opacity: 0.35;
+}
+
 /* Autoren-/Blame-Ansicht */
 .lp-blame-legend {
   display: flex;

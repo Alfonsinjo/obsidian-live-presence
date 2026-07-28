@@ -6,7 +6,7 @@ import { type Frame, buildFrames, listChangelog } from "./changelog";
 import { CollabBinding } from "./collab/binding";
 import { diffLines } from "./history";
 import { SessionTimelineModal } from "./session-modal";
-import { type HiddenRange, type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
+import { type FadedRange, type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
 import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
 import { fetchProfileName, saveProfileName } from "./profile";
@@ -477,11 +477,11 @@ export default class LivePresencePlugin extends Plugin {
 
   // Remove the hidden ranges from the coloured runs, so background colouring and
   // collapsed (hidden) text never overlap.
-  private clipRuns(runs: OverlayRun[], hidden: HiddenRange[]): OverlayRun[] {
+  private clipRuns(runs: OverlayRun[], faded: FadedRange[]): OverlayRun[] {
     const out: OverlayRun[] = [];
     for (const run of runs) {
       let cursor = run.from;
-      for (const h of hidden) {
+      for (const h of faded) {
         if (h.to <= cursor) continue;
         if (h.from >= run.to) break;
         const visTo = Math.min(h.from, run.to);
@@ -565,7 +565,7 @@ export default class LivePresencePlugin extends Plugin {
       return;
     }
     cm.dispatch({
-      effects: setOverlay.of({ runs: built.runs, hidden: [], legend: built.legend, title: "Autoren" }),
+      effects: setOverlay.of({ runs: built.runs, faded: [], legend: built.legend, title: "Autoren" }),
     });
     this.overlayMode = "authors";
     this.refreshRosters();
@@ -584,20 +584,20 @@ export default class LivePresencePlugin extends Plugin {
       this.overlayMode = null;
       return;
     }
-    const hidden = this.addedLineRanges(cache.frames[index].text, cm.state.doc.toString());
+    const faded = this.addedLineRanges(cache.frames[index].text, cm.state.doc.toString());
     let runs: OverlayRun[] = [];
     let legend: { label: string; color: string }[] = [];
     if (cache.authorRuns) {
       const built = this.buildAuthorOverlay(cache.authorRuns, cm.state.doc.length);
       if (built) {
-        runs = this.clipRuns(built.runs, hidden);
+        runs = this.clipRuns(built.runs, faded);
         legend = built.legend;
       }
     }
     cm.dispatch({
       effects: setOverlay.of({
         runs,
-        hidden,
+        faded,
         legend,
         title: `Stand: ${new Date(cache.frames[index].t).toLocaleString()}`,
       }),
@@ -606,8 +606,8 @@ export default class LivePresencePlugin extends Plugin {
   }
 
   // Ranges (including the trailing newline) of lines present in the current text
-  // but not in the old one, i.e. added later and to be hidden for an older view.
-  private addedLineRanges(oldText: string, newText: string): HiddenRange[] {
+  // but not in the old one, i.e. added later and greyed out for an older view.
+  private addedLineRanges(oldText: string, newText: string): FadedRange[] {
     const lines = newText.split("\n");
     const starts: number[] = [];
     let off = 0;
@@ -617,18 +617,18 @@ export default class LivePresencePlugin extends Plugin {
     }
     const docLen = newText.length;
     const ops = diffLines(oldText, newText);
-    const hidden: HiddenRange[] = [];
+    const faded: FadedRange[] = [];
     let j = 0;
     for (const op of ops) {
       if (op.type === "removed") continue;
       if (op.type === "added") {
         const from = starts[j];
         const to = Math.min(from + (lines[j]?.length ?? 0) + 1, docLen);
-        if (to > from) hidden.push({ from, to });
+        if (to > from) faded.push({ from, to });
       }
       j++;
     }
-    return hidden;
+    return faded;
   }
 
   private reapplyOverlayOnLeafChange(): void {

@@ -8,7 +8,7 @@ export interface OverlayRun {
   label: string;
 }
 
-export interface HiddenRange {
+export interface FadedRange {
   from: number;
   to: number;
 }
@@ -16,8 +16,8 @@ export interface HiddenRange {
 export interface OverlayData {
   // Author-coloured background runs (with a hover label).
   runs: OverlayRun[];
-  // Ranges to collapse/hide (text that did not yet exist at the chosen time).
-  hidden: HiddenRange[];
+  // Ranges to grey out (text that did not yet exist at the chosen time).
+  faded: FadedRange[];
   legend: { label: string; color: string }[];
   title: string;
 }
@@ -47,8 +47,10 @@ const overlayDecorations = EditorView.decorations.compute([overlayField], (state
       );
     }
   }
-  for (const h of data.hidden) {
-    if (h.from < h.to) ranges.push(Decoration.replace({}).range(h.from, h.to));
+  for (const f of data.faded) {
+    if (f.from < f.to) {
+      ranges.push(Decoration.mark({ class: "lp-faded" }).range(f.from, f.to));
+    }
   }
   // Let CodeMirror sort the (disjoint) ranges.
   return Decoration.set(ranges, true);
