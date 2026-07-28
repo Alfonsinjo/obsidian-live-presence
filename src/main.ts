@@ -2,7 +2,7 @@ import { EditorView } from "@codemirror/view";
 import { MarkdownView, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
 import { type AuthorRun, readAuthorRuns } from "./blame";
 import { BlameModal } from "./blame-modal";
-import { type Frame, buildFrames, listChangelog } from "./changelog";
+import { type Frame, buildFrames, buildSessions, listChangelog } from "./changelog";
 import { CollabBinding } from "./collab/binding";
 import { diffLines } from "./history";
 import { SessionTimelineModal } from "./session-modal";
@@ -11,7 +11,7 @@ import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
 import { fetchProfileName, saveProfileName } from "./profile";
 import { type RemoteCursor, remoteCursorsField, setRemoteCursors } from "./remote-cursors";
-import { ROSTER_VIEW_TYPE, RosterView } from "./roster-view";
+import { ROSTER_VIEW_TYPE, RosterView, type SidebarSession } from "./roster-view";
 import { LivePresenceSettingTab } from "./settings";
 import { VaultSync } from "./sync/vault-sync";
 import { DEFAULT_SETTINGS, type LivePresenceSettings } from "./types";
@@ -210,8 +210,7 @@ export default class LivePresencePlugin extends Plugin {
 
   private effectiveUser(): { name: string; color: string } {
     const name = this.displayName || this.settings.userName || "Anonym";
-    const color = this.settings.color || colorFromName(name);
-    return { name, color };
+    return { name, color: colorFromName(name) };
   }
 
   private effectiveAuth(): { user: string; pass: string } {
@@ -442,17 +441,23 @@ export default class LivePresencePlugin extends Plugin {
 
   // Load and cache the reconstructed timeline frames for a note; returns the
   // timestamp of each frame for the sidebar scrubber labels.
-  private async loadFrames(path: string): Promise<number[]> {
+  private async loadFrames(path: string): Promise<{ times: number[]; sessions: SidebarSession[] }> {
     if (!this.settings.serverUrl) {
       this.framesCache = null;
-      return [];
+      return { times: [], sessions: [] };
     }
     const auth = this.effectiveAuth();
     const entries = await listChangelog(this.settings.serverUrl, auth, path);
     const frames = buildFrames(entries);
     const authorRuns = await readAuthorRuns(this.settings.serverUrl, auth, path);
     this.framesCache = { path, frames, authorRuns };
-    return frames.map((f) => f.t);
+    const sessions: SidebarSession[] = buildSessions(entries, 10 * 60 * 1000).map((s) => ({
+      startT: s.startT,
+      endT: s.endT,
+      authors: s.authors,
+      index: s.endIndex,
+    }));
+    return { times: frames.map((f) => f.t), sessions };
   }
 
   // Map author runs to coloured overlay runs, aligned to the editor by length.

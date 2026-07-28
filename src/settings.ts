@@ -33,15 +33,11 @@ export class LivePresenceSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Farbe")
-      .setDesc("Deine Cursor-Farbe. Vorbelegt anhand deines Namens.")
-      .addColorPicker((cp) =>
-        cp
-          .setValue(this.plugin.settings.color || colorFromName(this.plugin.settings.userName || "Anonym"))
-          .onChange(async (v) => {
-            this.plugin.settings.color = v;
-            await this.plugin.saveSettings();
-          }),
-      );
+      .setDesc("Wird automatisch und eindeutig aus deinem Namen abgeleitet.")
+      .then((s) => {
+        const swatch = s.controlEl.createDiv({ cls: "lp-color-swatch" });
+        swatch.style.backgroundColor = colorFromName(this.plugin.settings.userName || "Anonym");
+      });
 
     new Setting(containerEl).setName("Verbindung").setHeading();
 

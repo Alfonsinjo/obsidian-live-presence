@@ -80,6 +80,13 @@
   opacity: 1;
 }
 
+.lp-color-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--background-modifier-border);
+}
+
 /* Ausgegrauter Text (später hinzugefügt) beim Zurückspulen */
 .lp-faded {
   opacity: 0.35;
@@ -201,11 +208,11 @@
 }
 .lp-ver-item {
   display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 3px 0;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px;
   font-size: 0.8em;
-  border-bottom: 1px solid var(--background-modifier-border-hover, transparent);
+  border-bottom: 1px solid var(--background-modifier-border);
 }
 .lp-ver-when {
   color: var(--text-normal);

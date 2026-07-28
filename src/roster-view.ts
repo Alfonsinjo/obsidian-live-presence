@@ -3,6 +3,13 @@ import type { RemoteEntry } from "./types";
 
 export const ROSTER_VIEW_TYPE = "live-presence-roster";
 
+export interface SidebarSession {
+  startT: number;
+  endT: number;
+  authors: string[];
+  index: number;
+}
+
 interface RosterCallbacks {
   getEntries: () => RemoteEntry[];
   getSelfId: () => number;
@@ -12,7 +19,7 @@ interface RosterCallbacks {
   onToggleAuthors: () => void;
   onClearOverlay: () => void;
   overlayInfo: () => { mode: "authors" | "asof" | null };
-  loadFrames: (path: string) => Promise<number[]>;
+  loadFrames: (path: string) => Promise<{ times: number[]; sessions: SidebarSession[] }>;
   onScrubTo: (index: number) => void;
 }
 
@@ -22,7 +29,7 @@ interface RosterCallbacks {
 export class RosterView extends ItemView {
   private presenceEl!: HTMLElement;
   private versionEl!: HTMLElement;
-  private frames: { path: string | null; times: number[] } | null = null;
+  private frames: { path: string | null; times: number[]; sessions: SidebarSession[] } | null = null;
   private playTimer: number | null = null;
 
   constructor(
@@ -73,9 +80,17 @@ export class RosterView extends ItemView {
   private async ensureFrames(force: boolean): Promise<void> {
     const path = this.cb.getActivePath();
     if (!force && this.frames?.path === path) return;
-    const times = path ? await this.cb.loadFrames(path) : [];
-    this.frames = { path, times };
+    const res = path ? await this.cb.loadFrames(path) : { times: [], sessions: [] };
+    this.frames = { path, times: res.times, sessions: res.sessions };
     this.renderVersions();
+  }
+
+  private sessionRange(s: SidebarSession): string {
+    const start = new Date(s.startT);
+    const end = new Date(s.endT);
+    const endStr =
+      start.toDateString() === end.toDateString() ? end.toLocaleTimeString() : end.toLocaleString();
+    return `${start.toLocaleString()} – ${endStr}`;
   }
 
   private iconButton(parent: HTMLElement, icon: string, label: string, active: boolean): HTMLElement {
@@ -223,6 +238,26 @@ export class RosterView extends ItemView {
     });
 
     setLabel(max);
+
+    // Clickable list of sessions; selecting one jumps the view to that point.
+    const sessions = this.frames && this.frames.path === path ? this.frames.sessions : [];
+    if (sessions.length > 0) {
+      root.createDiv({ cls: "lp-ver-hint", text: "Sitzungen (anklicken zum Ansehen):" });
+      const list = root.createDiv({ cls: "lp-ver-list" });
+      for (let i = sessions.length - 1; i >= 0; i--) {
+        const s = sessions[i];
+        const item = list.createDiv({ cls: "lp-ver-item lp-ver-clickable" });
+        item.createDiv({ cls: "lp-ver-when", text: this.sessionRange(s) });
+        item.createDiv({ cls: "lp-ver-by", text: s.authors.join(", ") });
+        item.onClickEvent(() => {
+          this.stopPlay();
+          setIcon(playBtn, "play");
+          slider.value = String(s.index);
+          setLabel(s.index);
+          this.cb.onScrubTo(s.index);
+        });
+      }
+    }
   }
 
   async onClose(): Promise<void> {

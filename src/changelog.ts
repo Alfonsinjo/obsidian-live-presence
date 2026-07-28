@@ -19,6 +19,8 @@ export interface Session {
   authors: string[];
   startText: string;
   endText: string;
+  // Frame index (number of changes) at the end of this session, for the scrubber.
+  endIndex: number;
 }
 
 export interface Frame {
@@ -94,12 +96,14 @@ export function buildSessions(entries: ChangeEntry[], gapMs: number): Session[] 
   const authors = doc.getMap("authors");
   const sessions: Session[] = [];
   let prevText = "";
+  let applied = 0;
 
   for (const group of groups) {
     const clients = new Set<number>();
     for (const e of group) {
       const update = base64ToBytes(e.u);
       Y.applyUpdate(doc, update);
+      applied++;
       const sv = Y.decodeStateVector(Y.encodeStateVectorFromUpdate(update));
       for (const client of sv.keys()) clients.add(client);
     }
@@ -115,6 +119,7 @@ export function buildSessions(entries: ChangeEntry[], gapMs: number): Session[] 
       authors: [...names],
       startText: prevText,
       endText,
+      endIndex: applied,
     });
     prevText = endText;
   }
