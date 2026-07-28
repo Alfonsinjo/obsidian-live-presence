@@ -6,6 +6,7 @@ import { CollabBinding } from "./collab/binding";
 import { diffLines, listVersions, saveVersion as storeVersion } from "./history";
 import { SessionTimelineModal } from "./session-modal";
 import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
+import { PlaybackModal } from "./playback-modal";
 import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
 import { fetchProfileName, saveProfileName } from "./profile";
@@ -64,6 +65,7 @@ export default class LivePresencePlugin extends Plugin {
           loadVersions: (path) => this.loadVersions(path),
           onSaveVersion: () => this.saveVersion(),
           onOpenHistory: () => this.showHistory(),
+          onOpenPlayback: () => this.showPlayback(),
           onToggleAuthors: () => void this.toggleAuthorsOverlay(),
           onShowSince: (t) => void this.showSinceOverlay(t),
           onClearOverlay: () => this.clearOverlay(),
@@ -112,6 +114,11 @@ export default class LivePresencePlugin extends Plugin {
       id: "lp-save-version",
       name: "Version dieser Notiz merken",
       callback: () => this.saveVersion(),
+    });
+    this.addCommand({
+      id: "lp-playback",
+      name: "Wiedergabe dieser Notiz (Verlauf über die Zeit)",
+      callback: () => this.showPlayback(),
     });
 
     this.app.workspace.onLayoutReady(() => {
@@ -596,6 +603,15 @@ export default class LivePresencePlugin extends Plugin {
       return;
     }
     new SessionTimelineModal(this.app, this.settings.serverUrl, this.effectiveAuth(), path).open();
+  }
+
+  private showPlayback(): void {
+    const path = this.activePath();
+    if (!path || !this.settings.serverUrl) {
+      new Notice("Live Presence: Keine aktive Notiz oder Server-URL fehlt.");
+      return;
+    }
+    new PlaybackModal(this.app, this.settings.serverUrl, this.effectiveAuth(), path).open();
   }
 
   private async saveVersion(): Promise<void> {

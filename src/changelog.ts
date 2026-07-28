@@ -21,6 +21,24 @@ export interface Session {
   endText: string;
 }
 
+export interface Frame {
+  t: number;
+  text: string;
+}
+
+// Reconstruct the document text after each logged change, for a time scrubber.
+// Frame 0 is the empty starting state; frame k is the text after k changes.
+export function buildFrames(entries: ChangeEntry[]): Frame[] {
+  const doc = new Y.Doc({ gc: false });
+  const text = doc.getText("content");
+  const frames: Frame[] = [{ t: entries.length ? entries[0].t0 : 0, text: "" }];
+  for (const e of entries) {
+    Y.applyUpdate(doc, base64ToBytes(e.u));
+    frames.push({ t: e.t1, text: text.toString() });
+  }
+  return frames;
+}
+
 export async function listChangelog(
   serverUrl: string,
   auth: { user: string; pass: string },

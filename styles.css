@@ -255,6 +255,26 @@
   border-radius: 50%;
 }
 
+/* Wiedergabe / Zeit-Schieberegler */
+.lp-playback-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.lp-playback-label {
+  font-size: 0.8em;
+  color: var(--text-muted);
+}
+.lp-playback-slider {
+  width: 100%;
+  margin-bottom: 12px;
+}
+.lp-playback-text {
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
 /* Statusleiste */
 .lp-statusbar { cursor: pointer; }
 .lp-statusbar .lp-roster-dot { display: inline-block; margin-right: 4px; vertical-align: middle; }

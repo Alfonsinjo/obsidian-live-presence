@@ -16,6 +16,7 @@ interface RosterCallbacks {
   loadVersions: (path: string) => Promise<VersionInfo[]>;
   onSaveVersion: () => Promise<void>;
   onOpenHistory: () => void;
+  onOpenPlayback: () => void;
   onToggleAuthors: () => void;
   onShowSince: (t: number) => void;
   onClearOverlay: () => void;
@@ -144,7 +145,8 @@ export class RosterView extends ItemView {
     });
     if (info.mode === "authors") authBtn.addClass("lp-btn-active");
     authBtn.onClickEvent(() => this.cb.onToggleAuthors());
-    actions.createEl("button", { text: "Verlauf (Fenster)" }).onClickEvent(() => this.cb.onOpenHistory());
+    actions.createEl("button", { text: "Verlauf" }).onClickEvent(() => this.cb.onOpenHistory());
+    actions.createEl("button", { text: "Wiedergabe" }).onClickEvent(() => this.cb.onOpenPlayback());
     if (info.mode) {
       actions.createEl("button", { text: "Hervorhebung aus" }).onClickEvent(() => this.cb.onClearOverlay());
     }
