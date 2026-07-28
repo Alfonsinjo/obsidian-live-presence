@@ -8,13 +8,20 @@ export interface OverlayRun {
   label: string;
 }
 
+export interface HiddenRange {
+  from: number;
+  to: number;
+}
+
 export interface OverlayData {
+  // Author-coloured background runs (with a hover label).
   runs: OverlayRun[];
+  // Ranges to collapse/hide (text that did not yet exist at the chosen time).
+  hidden: HiddenRange[];
   legend: { label: string; color: string }[];
   title: string;
 }
 
-// Effect to set (or clear, with null) the in-editor history overlay.
 export const setOverlay = StateEffect.define<OverlayData | null>();
 
 const overlayField = StateField.define<OverlayData | null>({
@@ -40,6 +47,10 @@ const overlayDecorations = EditorView.decorations.compute([overlayField], (state
       );
     }
   }
+  for (const h of data.hidden) {
+    if (h.from < h.to) ranges.push(Decoration.replace({}).range(h.from, h.to));
+  }
+  // Let CodeMirror sort the (disjoint) ranges.
   return Decoration.set(ranges, true);
 });
 

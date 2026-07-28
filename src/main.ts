@@ -1,12 +1,12 @@
 import { EditorView } from "@codemirror/view";
 import { MarkdownView, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
-import { readAuthorRuns } from "./blame";
+import { type AuthorRun, readAuthorRuns } from "./blame";
 import { BlameModal } from "./blame-modal";
 import { type Frame, buildFrames, listChangelog } from "./changelog";
 import { CollabBinding } from "./collab/binding";
 import { diffLines } from "./history";
 import { SessionTimelineModal } from "./session-modal";
-import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
+import { type HiddenRange, type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
 import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
 import { fetchProfileName, saveProfileName } from "./profile";
@@ -36,8 +36,9 @@ export default class LivePresencePlugin extends Plugin {
   private displayName = "";
   // In-editor history overlay state.
   private overlayMode: "authors" | "asof" | null = null;
-  // Cached reconstructed frames of the current note, for the timeline scrubber.
-  private framesCache: { path: string; frames: Frame[] } | null = null;
+  // Cached reconstructed frames and author runs of the current note, for the
+  // timeline scrubber and author colouring.
+  private framesCache: { path: string; frames: Frame[]; authorRuns: AuthorRun[] | null } | null = null;
 
   private reportCursor = debounce((anchor: number, head: number, docLen: number) => {
     this.presence?.setCursor({ anchor, head, docLen });
@@ -446,10 +447,51 @@ export default class LivePresencePlugin extends Plugin {
       this.framesCache = null;
       return [];
     }
-    const entries = await listChangelog(this.settings.serverUrl, this.effectiveAuth(), path);
+    const auth = this.effectiveAuth();
+    const entries = await listChangelog(this.settings.serverUrl, auth, path);
     const frames = buildFrames(entries);
-    this.framesCache = { path, frames };
+    const authorRuns = await readAuthorRuns(this.settings.serverUrl, auth, path);
+    this.framesCache = { path, frames, authorRuns };
     return frames.map((f) => f.t);
+  }
+
+  // Map author runs to coloured overlay runs, aligned to the editor by length.
+  private buildAuthorOverlay(
+    authorRuns: AuthorRun[],
+    docLen: number,
+  ): { runs: OverlayRun[]; legend: { label: string; color: string }[] } | null {
+    const total = authorRuns.reduce((n, r) => n + r.text.length, 0);
+    if (total !== docLen) return null;
+    let pos = 0;
+    const runs: OverlayRun[] = [];
+    const legend = new Map<string, string>();
+    for (const r of authorRuns) {
+      const from = pos;
+      const to = pos + r.text.length;
+      pos = to;
+      if (to > from) runs.push({ from, to, color: withAlpha(r.color, 0.28), label: r.name });
+      if (!legend.has(r.name)) legend.set(r.name, r.color);
+    }
+    return { runs, legend: [...legend].map(([label, color]) => ({ label, color })) };
+  }
+
+  // Remove the hidden ranges from the coloured runs, so background colouring and
+  // collapsed (hidden) text never overlap.
+  private clipRuns(runs: OverlayRun[], hidden: HiddenRange[]): OverlayRun[] {
+    const out: OverlayRun[] = [];
+    for (const run of runs) {
+      let cursor = run.from;
+      for (const h of hidden) {
+        if (h.to <= cursor) continue;
+        if (h.from >= run.to) break;
+        const visTo = Math.min(h.from, run.to);
+        if (visTo > cursor) out.push({ ...run, from: cursor, to: visTo });
+        cursor = Math.min(h.to, run.to);
+        if (cursor >= run.to) break;
+      }
+      if (cursor < run.to) out.push({ ...run, from: cursor, to: run.to });
+    }
+    return out;
   }
 
   // Editor of the current note, found by file rather than focus, so it also
@@ -517,53 +559,55 @@ export default class LivePresencePlugin extends Plugin {
       if (!silent) new Notice("Live Presence: Autoren konnten nicht zugeordnet werden (Text nicht synchron).");
       return;
     }
-    let pos = 0;
-    const oruns: OverlayRun[] = [];
-    const legend = new Map<string, string>();
-    for (const r of runs) {
-      const from = pos;
-      const to = pos + r.text.length;
-      pos = to;
-      if (to > from) oruns.push({ from, to, color: withAlpha(r.color, 0.28), label: r.name });
-      if (!legend.has(r.name)) legend.set(r.name, r.color);
+    const built = this.buildAuthorOverlay(runs, cm.state.doc.length);
+    if (!built) {
+      if (!silent) new Notice("Live Presence: Autoren konnten nicht zugeordnet werden (Text nicht synchron).");
+      return;
     }
     cm.dispatch({
-      effects: setOverlay.of({
-        runs: oruns,
-        legend: [...legend].map(([label, color]) => ({ label, color })),
-        title: "Autoren",
-      }),
+      effects: setOverlay.of({ runs: built.runs, hidden: [], legend: built.legend, title: "Autoren" }),
     });
     this.overlayMode = "authors";
     this.refreshRosters();
   }
 
-  // Highlight (green) the lines added since the frame at the given index, i.e.
-  // show the document "as of" that time. Driven by the sidebar scrubber, so it
-  // does not re-render the sidebar (that would fight with dragging the slider).
+  // Show the document as of the frame at the given index: hide the lines added
+  // after that time and colour the remaining text by author. Driven by the
+  // sidebar scrubber, so it does not re-render the sidebar.
   showAsOfOverlay(index: number): void {
     const cm = this.activeCmView();
-    const frames = this.framesCache?.frames;
-    if (!cm || !frames || index < 0 || index >= frames.length) return;
-    if (index >= frames.length - 1) {
-      cm.dispatch({ effects: setOverlay.of(null) }); // "now": nothing is newer
+    const cache = this.framesCache;
+    if (!cm || !cache || cache.path !== this.activePath()) return;
+    if (index < 0 || index >= cache.frames.length) return;
+    if (index >= cache.frames.length - 1) {
+      cm.dispatch({ effects: setOverlay.of(null) }); // "now": nothing to hide
       this.overlayMode = null;
       return;
     }
-    const green = "#2ea043";
-    const runs = this.addedRanges(frames[index].text, cm.state.doc.toString(), withAlpha(green, 0.3));
+    const hidden = this.addedLineRanges(cache.frames[index].text, cm.state.doc.toString());
+    let runs: OverlayRun[] = [];
+    let legend: { label: string; color: string }[] = [];
+    if (cache.authorRuns) {
+      const built = this.buildAuthorOverlay(cache.authorRuns, cm.state.doc.length);
+      if (built) {
+        runs = this.clipRuns(built.runs, hidden);
+        legend = built.legend;
+      }
+    }
     cm.dispatch({
       effects: setOverlay.of({
         runs,
-        legend: [{ label: `neu seit ${new Date(frames[index].t).toLocaleString()}`, color: green }],
-        title: "Änderungen",
+        hidden,
+        legend,
+        title: `Stand: ${new Date(cache.frames[index].t).toLocaleString()}`,
       }),
     });
     this.overlayMode = "asof";
   }
 
-  // Character ranges of lines present in the current text but not in the old one.
-  private addedRanges(oldText: string, newText: string, color: string): OverlayRun[] {
+  // Ranges (including the trailing newline) of lines present in the current text
+  // but not in the old one, i.e. added later and to be hidden for an older view.
+  private addedLineRanges(oldText: string, newText: string): HiddenRange[] {
     const lines = newText.split("\n");
     const starts: number[] = [];
     let off = 0;
@@ -571,19 +615,20 @@ export default class LivePresencePlugin extends Plugin {
       starts.push(off);
       off += line.length + 1;
     }
+    const docLen = newText.length;
     const ops = diffLines(oldText, newText);
-    const runs: OverlayRun[] = [];
+    const hidden: HiddenRange[] = [];
     let j = 0;
     for (const op of ops) {
       if (op.type === "removed") continue;
       if (op.type === "added") {
         const from = starts[j];
-        const to = from + (lines[j]?.length ?? 0);
-        if (to > from) runs.push({ from, to, color, label: "neu" });
+        const to = Math.min(from + (lines[j]?.length ?? 0) + 1, docLen);
+        if (to > from) hidden.push({ from, to });
       }
       j++;
     }
-    return runs;
+    return hidden;
   }
 
   private reapplyOverlayOnLeafChange(): void {
