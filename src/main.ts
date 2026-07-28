@@ -4,7 +4,7 @@ import { readAuthorRuns } from "./blame";
 import { BlameModal } from "./blame-modal";
 import { CollabBinding } from "./collab/binding";
 import { diffLines, listVersions, saveVersion as storeVersion } from "./history";
-import { HistoryModal } from "./history-modal";
+import { SessionTimelineModal } from "./session-modal";
 import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
 import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
@@ -595,7 +595,7 @@ export default class LivePresencePlugin extends Plugin {
       new Notice("Live Presence: Bitte die Server-URL in den Einstellungen eintragen.");
       return;
     }
-    new HistoryModal(this.app, this.settings.serverUrl, this.effectiveAuth(), path).open();
+    new SessionTimelineModal(this.app, this.settings.serverUrl, this.effectiveAuth(), path).open();
   }
 
   private async saveVersion(): Promise<void> {
