@@ -10,6 +10,8 @@ import {
   registerAuthor,
   sleep,
 } from "../utils";
+import { type ChangeEntry, listChangelog, reconstructBase } from "../changelog";
+import { type MergeResult, mergeThreeWay } from "../merge";
 import { blobExists, downloadBlob, uploadBlob } from "./blobs";
 
 interface Auth {
@@ -63,17 +65,26 @@ export class VaultSync {
   private running = false;
 
   // "Base" hash last successfully synchronised per path; only updated on success,
-  // so a failed push/pull is retried by the next reconcile pass.
+  // so a failed push/pull is retried by the next reconcile pass. Persisted so
+  // three-way merges survive an Obsidian restart.
   private localHashes = new Map<string, string>();
+  // Last-synced text per path (in-memory), used as the merge base when available.
+  private baseText = new Map<string, string>();
   // Cached file mtime, to avoid re-hashing unchanged files on every reconcile.
   private mtimes = new Map<string, number>();
   private pendingWrites = new Map<string, string>();
   private pushers = new Map<string, (path: string) => void>();
+  private conflictsInProgress = new Set<string>();
 
   private reconcileRunning = false;
   private reconcileTimer: number | null = null;
   private interval: number | null = null;
   private onlineHandler = () => this.scheduleReconcile();
+  private saveBase = debounce(() => {
+    const record: Record<string, string> = {};
+    for (const [p, h] of this.localHashes) record[p] = h;
+    this.saveBaseHashes(record);
+  }, 2000);
 
   // Persistent connection to the document of the currently open non-CodeMirror
   // text file (e.g. Excalidraw), so its changes propagate live.
@@ -85,6 +96,9 @@ export class VaultSync {
     private auth: Auth,
     private isCoEditing: (path: string) => boolean,
     private getUser: () => { name: string; color: string },
+    private loadBaseHashes: () => Promise<Record<string, string>>,
+    private saveBaseHashes: (record: Record<string, string>) => void,
+    private onConflict: (path: string, result: MergeResult) => Promise<"merge" | "discard">,
     private log: (...args: unknown[]) => void,
   ) {}
 
@@ -92,6 +106,14 @@ export class VaultSync {
     if (this.running) return;
     if (!this.serverUrl || !this.auth.user) return;
     this.running = true;
+
+    // Restore the last-synced hashes so conflicts can be detected after a restart.
+    try {
+      const stored = await this.loadBaseHashes();
+      for (const [p, h] of Object.entries(stored)) this.localHashes.set(p, h);
+    } catch {
+      // no stored base yet
+    }
 
     this.indexDoc = new Y.Doc();
     this.indexProvider = new WebsocketProvider(this.serverUrl, INDEX_ROOM, this.indexDoc, {
@@ -217,6 +239,7 @@ export class VaultSync {
         if (!entry || entry.d) continue;
         if (!localPaths.has(path)) await this.pull(path, entry);
       }
+      this.saveBase();
     } finally {
       this.reconcileRunning = false;
     }
@@ -240,19 +263,90 @@ export class VaultSync {
 
     if (entry && !entry.d && entry.h === current) {
       this.localHashes.set(path, current); // already in sync
+      if (this.kindOf(path) === "t" && !this.baseText.has(path)) {
+        this.baseText.set(path, normalizeLineEndings(await this.app.vault.read(file)));
+      }
+      return;
+    }
+
+    const localChanged = base !== undefined && current !== base;
+    const remoteChanged = base !== undefined && !!entry && !entry.d && entry.h !== base;
+
+    // Both sides changed the note since our last sync -> merge instead of
+    // overwriting, so no one's text is lost.
+    if (localChanged && remoteChanged && entry && entry.h !== current) {
+      if (this.kindOf(path) === "t") {
+        void this.handleConflict(path, base as string);
+        return;
+      }
+      if (file.stat.mtime >= entry.t) {
+        if (await this.push(path, current)) this.localHashes.set(path, current);
+      } else {
+        await this.pull(path, entry);
+      }
       return;
     }
 
     if (current !== base) {
-      // Local content changed since our last successful sync.
       if (!entry || entry.d || file.stat.mtime >= entry.t) {
         if (await this.push(path, current)) this.localHashes.set(path, current);
       } else {
-        await this.pull(path, entry); // remote is newer
+        await this.pull(path, entry);
       }
     } else if (entry && !entry.d && entry.h !== base) {
-      await this.pull(path, entry); // remote changed while we were unchanged
+      await this.pull(path, entry);
     }
+  }
+
+  // Three-way merge for a note changed on both sides. Clean merges apply
+  // automatically; overlapping conflicts are resolved by the user.
+  private async handleConflict(path: string, baseHash: string): Promise<void> {
+    if (this.conflictsInProgress.has(path)) return;
+    this.conflictsInProgress.add(path);
+    try {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!(file instanceof TFile)) return;
+      const local = normalizeLineEndings(await this.app.vault.read(file));
+      const remote = await this.readText(path);
+      if (remote === null) return; // remote unavailable; retry next pass
+
+      let base = this.baseText.get(path);
+      if (base === undefined) {
+        const entries: ChangeEntry[] = await listChangelog(this.serverUrl, this.auth, path);
+        base = reconstructBase(entries, baseHash) ?? "";
+      }
+
+      const result = mergeThreeWay(base, local, remote);
+      if (result.conflicts.length === 0) {
+        this.log(`auto-merged ${path}`);
+        await this.applyMerged(path, result.text);
+        return;
+      }
+      const action = await this.onConflict(path, result);
+      if (action === "merge") {
+        await this.applyMerged(path, result.text);
+      } else {
+        // Keep local; push it so the shared copy matches.
+        const h = hashString(local);
+        if (await this.push(path, h)) {
+          this.localHashes.set(path, h);
+          this.baseText.set(path, local);
+          this.saveBase();
+        }
+      }
+    } finally {
+      this.conflictsInProgress.delete(path);
+    }
+  }
+
+  private async applyMerged(path: string, text: string): Promise<void> {
+    await this.writeText(path, text); // materialise the merged result
+    const h = hashString(text);
+    if (await this.pushText(path, h)) {
+      this.localHashes.set(path, h);
+    }
+    this.baseText.set(path, text);
+    this.saveBase();
   }
 
   private onLocalChange(path: string): void {
@@ -278,13 +372,16 @@ export class VaultSync {
       applyMinimalYTextUpdate(this.live.doc, this.live.doc.getText("content"), content);
       this.files?.set(path, { k: "t", h, t: Date.now() });
       this.localHashes.set(path, h);
+      this.baseText.set(path, content);
       this.mtimes.set(path, file.stat.mtime);
+      this.saveBase();
       this.log(`live-pushed ${path} (${content.length} chars)`);
       return;
     }
     if (await this.push(path, h)) {
       this.localHashes.set(path, h);
       this.mtimes.set(path, file.stat.mtime);
+      this.saveBase();
     }
   }
 
@@ -327,6 +424,8 @@ export class VaultSync {
       applyMinimalYTextUpdate(doc, text, content);
       await sleep(600); // allow the update to reach and be persisted by the server
       this.files.set(path, { k: "t", h: hash, t: Date.now() });
+      this.baseText.set(path, content);
+      this.saveBase();
       this.log(`pushed text ${path} (${content.length} chars)`);
       return true;
     } finally {
@@ -401,12 +500,16 @@ export class VaultSync {
         return;
       }
       this.localHashes.set(path, hashString(content));
+      this.baseText.set(path, content);
+      this.saveBase();
       await this.app.vault.modify(existing, content);
       this.mtimes.set(path, existing.stat.mtime);
       this.log(`wrote text ${path} (${content.length} chars)`);
     } else {
       if (content.length === 0) return; // do not create empty notes through sync
       this.localHashes.set(path, hashString(content));
+      this.baseText.set(path, content);
+      this.saveBase();
       await this.ensureFolder(path);
       await this.app.vault.create(path, content);
       this.log(`created text ${path} (${content.length} chars)`);

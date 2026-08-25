@@ -2,6 +2,7 @@ import { EditorView } from "@codemirror/view";
 import { MarkdownView, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
 import { listChangelog } from "./changelog";
 import { CollabBinding } from "./collab/binding";
+import { ConflictModal } from "./conflict-modal";
 import { type DayInfo, type TimedRun, reconstructHistory } from "./history-blame";
 import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
 import { NameModal } from "./name-modal";
@@ -206,6 +207,24 @@ export default class LivePresencePlugin extends Plugin {
     return { user: this.settings.authUser, pass: this.settings.authPass };
   }
 
+  // Last-synced content hashes, persisted so conflicts can be detected across
+  // restarts (kept in the plugin's own folder, not in the vault notes).
+  private baseFilePath(): string {
+    return `${this.manifest.dir}/sync-base.json`;
+  }
+  private async loadBaseHashes(): Promise<Record<string, string>> {
+    try {
+      const raw = await this.app.vault.adapter.read(this.baseFilePath());
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+    } catch {
+      return {};
+    }
+  }
+  private saveBaseHashes(record: Record<string, string>): void {
+    void this.app.vault.adapter.write(this.baseFilePath(), JSON.stringify(record));
+  }
+
   // Connect to the presence server. Resolves the display name from the profile
   // database first (asking for it once if it is not set yet).
   private async startPresence(): Promise<void> {
@@ -276,6 +295,10 @@ export default class LivePresencePlugin extends Plugin {
       this.effectiveAuth(),
       (path) => this.binding.isActive(path),
       () => this.effectiveUser(),
+      () => this.loadBaseHashes(),
+      (record) => this.saveBaseHashes(record),
+      (path, result) =>
+        new Promise((resolve) => new ConflictModal(this.app, path, result, resolve).open()),
       () => {}, // logging silenced for normal operation
     );
     void this.vaultSync.start();

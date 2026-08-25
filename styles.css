@@ -87,6 +87,49 @@
   border: 1px solid var(--background-modifier-border);
 }
 
+/* Konflikt-Popup */
+.lp-conflict-block {
+  display: flex;
+  gap: 10px;
+  margin: 10px 0;
+}
+.lp-conflict-side {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.lp-conflict-label {
+  font-size: 0.8em;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+.lp-conflict-mine,
+.lp-conflict-other {
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 0.85em;
+  max-height: 30vh;
+  overflow: auto;
+}
+.lp-conflict-mine {
+  background: rgba(46, 160, 67, 0.18);
+}
+.lp-conflict-other {
+  background: rgba(88, 166, 255, 0.18);
+}
+.lp-conflict-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.lp-conflict-hint {
+  font-size: 0.78em;
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+
 /* Ausgegrauter Text (später hinzugefügt) beim Zurückspulen */
 .lp-faded {
   opacity: 0.35;

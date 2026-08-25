@@ -1,5 +1,7 @@
 import { requestUrl } from "obsidian";
+import * as Y from "yjs";
 import { authHeader, couchBase } from "./profile";
+import { base64ToBytes, hashString } from "./utils";
 
 // Reads the append-only change log written by the server (one merged Yjs update
 // per short time window).
@@ -9,6 +11,20 @@ export interface ChangeEntry {
   t0: number;
   t1: number;
   u: string; // base64-encoded merged Yjs update
+}
+
+// Replay the log to find the past text whose hash matches, i.e. the common base
+// for a three-way merge. Returns null if no logged state matches.
+export function reconstructBase(entries: ChangeEntry[], targetHash: string): string | null {
+  if (hashString("") === targetHash) return "";
+  const doc = new Y.Doc({ gc: false });
+  const text = doc.getText("content");
+  for (const e of entries) {
+    Y.applyUpdate(doc, base64ToBytes(e.u));
+    const t = text.toString();
+    if (hashString(t) === targetHash) return t;
+  }
+  return null;
 }
 
 export async function listChangelog(
