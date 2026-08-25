@@ -269,49 +269,43 @@ export class VaultSync {
       return;
     }
 
-    const localChanged = base !== undefined && current !== base;
-    const remoteChanged = base !== undefined && !!entry && !entry.d && entry.h !== base;
-
-    // Both sides changed the note since our last sync -> merge instead of
-    // overwriting, so no one's text is lost.
-    if (localChanged && remoteChanged && entry && entry.h !== current) {
-      if (this.kindOf(path) === "t") {
-        void this.handleConflict(path, base as string);
-        return;
-      }
-      if (file.stat.mtime >= entry.t) {
-        if (await this.push(path, current)) this.localHashes.set(path, current);
-      } else {
-        await this.pull(path, entry);
-      }
-      return;
-    }
-
+    // Our copy changed since the last sync -> push it. For text, pushText
+    // detects when the shared copy also diverged and performs a three-way
+    // merge (never a blind overwrite), so neither side's text is lost. Only
+    // the shared copy changed -> pull (safe, our copy is untouched).
+    // Binary files have no line merge, so they keep last-writer-wins by mtime.
     if (current !== base) {
-      if (!entry || entry.d || file.stat.mtime >= entry.t) {
-        if (await this.push(path, current)) this.localHashes.set(path, current);
+      const remoteChanged = !!entry && !entry.d && entry.h !== base && entry.h !== current;
+      if (this.kindOf(path) === "b" && remoteChanged && entry && file.stat.mtime < entry.t) {
+        await this.pull(path, entry); // remote binary is newer
       } else {
-        await this.pull(path, entry);
+        await this.push(path, current); // push (text push merges on conflict)
       }
     } else if (entry && !entry.d && entry.h !== base) {
       await this.pull(path, entry);
     }
   }
 
-  // Three-way merge for a note changed on both sides. Clean merges apply
-  // automatically; overlapping conflicts are resolved by the user.
-  private async handleConflict(path: string, baseHash: string): Promise<void> {
+  // Three-way merge for a note that diverged on both sides. Clean merges apply
+  // automatically; overlapping conflicts are resolved by the user. Nothing is
+  // ever discarded silently: the worst case keeps both versions with markers.
+  private async mergeAndResolve(
+    path: string,
+    baseHash: string | undefined,
+    local: string,
+    remote: string,
+  ): Promise<void> {
     if (this.conflictsInProgress.has(path)) return;
     this.conflictsInProgress.add(path);
     try {
-      const file = this.app.vault.getAbstractFileByPath(path);
-      if (!(file instanceof TFile)) return;
-      const local = normalizeLineEndings(await this.app.vault.read(file));
-      const remote = await this.readText(path);
-      if (remote === null) return; // remote unavailable; retry next pass
-
-      let base = this.baseText.get(path);
-      if (base === undefined) {
+      // Recover the common ancestor. Only trust the cached base text if it
+      // still matches the recorded base hash; otherwise reconstruct it from the
+      // change log so a stale cache can never turn a merge into an overwrite.
+      let base = "";
+      const cached = this.baseText.get(path);
+      if (cached !== undefined && (baseHash === undefined || hashString(cached) === baseHash)) {
+        base = cached;
+      } else if (baseHash !== undefined) {
         const entries: ChangeEntry[] = await listChangelog(this.serverUrl, this.auth, path);
         base = reconstructBase(entries, baseHash) ?? "";
       }
@@ -326,13 +320,9 @@ export class VaultSync {
       if (action === "merge") {
         await this.applyMerged(path, result.text);
       } else {
-        // Keep local; push it so the shared copy matches.
+        // Keep only local; push it raw so the shared copy matches.
         const h = hashString(local);
-        if (await this.push(path, h)) {
-          this.localHashes.set(path, h);
-          this.baseText.set(path, local);
-          this.saveBase();
-        }
+        await this.pushTextRaw(path, h, local);
       }
     } finally {
       this.conflictsInProgress.delete(path);
@@ -340,13 +330,10 @@ export class VaultSync {
   }
 
   private async applyMerged(path: string, text: string): Promise<void> {
-    await this.writeText(path, text); // materialise the merged result
-    const h = hashString(text);
-    if (await this.pushText(path, h)) {
-      this.localHashes.set(path, h);
-    }
-    this.baseText.set(path, text);
-    this.saveBase();
+    await this.writeText(path, text); // materialise the merged result on disk
+    // Raw push: the merged text already contains the remote changes, so it must
+    // not be re-diffed against the shared copy (that would loop).
+    await this.pushTextRaw(path, hashString(text), text);
   }
 
   private onLocalChange(path: string): void {
@@ -378,10 +365,10 @@ export class VaultSync {
       this.log(`live-pushed ${path} (${content.length} chars)`);
       return;
     }
+    // push() owns localHashes/baseText now: a plain push sets them to h, a
+    // conflict merge sets them to the merged hash instead. Do not overwrite.
     if (await this.push(path, h)) {
-      this.localHashes.set(path, h);
       this.mtimes.set(path, file.stat.mtime);
-      this.saveBase();
     }
   }
 
@@ -399,38 +386,94 @@ export class VaultSync {
       connect: true,
       params: { u: this.auth.user, p: this.auth.pass },
     });
+    const baseHash = this.localHashes.get(path);
+    let conflictRemote: string | null = null;
+    try {
+      const synced = await this.waitForSync(provider, SYNC_TIMEOUT);
+      if (!synced || !this.running) return false;
+      const text = doc.getText("content");
+      const remote = text.toString();
+      // Conflict guard: if the shared copy diverged from the ancestor we last
+      // synced while our copy also changed, we must NOT overwrite it. Compare
+      // against the recorded base hash (survives restarts), not a live cache,
+      // so this holds even if the file index has not caught up yet. When we
+      // have no base at all, any differing non-empty shared copy is treated as
+      // a conflict too, so a blind overwrite is impossible.
+      const remoteDiffersFromBase =
+        baseHash === undefined ? hashString(remote) !== hash : hashString(remote) !== baseHash;
+      const localDiffersFromBase = baseHash === undefined || hash !== baseHash;
+      if (remote.length > 0 && remoteDiffersFromBase && localDiffersFromBase) {
+        conflictRemote = remote; // resolved after the connection is closed
+      } else {
+        registerAuthor(doc, this.getUser());
+        this.seedIfEmpty(doc, provider, content);
+        if (!this.running) return false;
+        applyMinimalYTextUpdate(doc, text, content);
+        await sleep(600); // allow the update to reach and be persisted by the server
+        this.files.set(path, { k: "t", h: hash, t: Date.now() });
+        this.localHashes.set(path, hash);
+        this.baseText.set(path, content);
+        this.saveBase();
+        this.log(`pushed text ${path} (${content.length} chars)`);
+      }
+    } finally {
+      provider.destroy();
+      doc.destroy();
+    }
+    if (conflictRemote !== null) {
+      await this.mergeAndResolve(path, baseHash, content, conflictRemote);
+    }
+    return true;
+  }
+
+  // Push exactly this content to the shared copy with no conflict check. Used
+  // after a merge, where the content already contains the remote changes and
+  // re-diffing it against the shared copy would loop.
+  private async pushTextRaw(path: string, hash: string, content: string): Promise<boolean> {
+    if (!this.files) return false;
+    const doc = new Y.Doc();
+    const provider = new WebsocketProvider(this.serverUrl, this.roomFor(path), doc, {
+      connect: true,
+      params: { u: this.auth.user, p: this.auth.pass },
+    });
     try {
       const synced = await this.waitForSync(provider, SYNC_TIMEOUT);
       if (!synced || !this.running) return false;
       registerAuthor(doc, this.getUser());
       const text = doc.getText("content");
-      // Seeding an empty document: only one client should insert the full text,
-      // otherwise two concurrent seeds would produce duplicated content. Elect
-      // the lowest client id; the others wait for the content to arrive.
-      if (text.length === 0 && content.length > 0) {
-        provider.awareness.setLocalStateField("seed", true);
-        await sleep(500);
-        if (!this.running) return false;
-        const self = doc.clientID;
-        const others = [...provider.awareness.getStates().keys()].filter((id) => id !== self);
-        const iSeed = others.length === 0 || self <= Math.min(...others);
-        if (!iSeed) {
-          for (let i = 0; i < 25 && text.length === 0; i++) {
-            await sleep(100);
-            if (!this.running) return false;
-          }
-        }
-      }
+      this.seedIfEmpty(doc, provider, content);
+      if (!this.running) return false;
       applyMinimalYTextUpdate(doc, text, content);
-      await sleep(600); // allow the update to reach and be persisted by the server
+      await sleep(600);
       this.files.set(path, { k: "t", h: hash, t: Date.now() });
+      this.localHashes.set(path, hash);
       this.baseText.set(path, content);
       this.saveBase();
-      this.log(`pushed text ${path} (${content.length} chars)`);
+      this.log(`pushed text ${path} (${content.length} chars, merged)`);
       return true;
     } finally {
       provider.destroy();
       doc.destroy();
+    }
+  }
+
+  // Seeding an empty document: only one client should insert the full text,
+  // otherwise two concurrent seeds would duplicate content. Elect the lowest
+  // client id; the others wait briefly for the content to arrive.
+  private async seedIfEmpty(doc: Y.Doc, provider: WebsocketProvider, content: string): Promise<void> {
+    const text = doc.getText("content");
+    if (text.length !== 0 || content.length === 0) return;
+    provider.awareness.setLocalStateField("seed", true);
+    await sleep(500);
+    if (!this.running) return;
+    const self = doc.clientID;
+    const others = [...provider.awareness.getStates().keys()].filter((id) => id !== self);
+    const iSeed = others.length === 0 || self <= Math.min(...others);
+    if (!iSeed) {
+      for (let i = 0; i < 25 && text.length === 0; i++) {
+        await sleep(100);
+        if (!this.running) return;
+      }
     }
   }
 
@@ -448,6 +491,7 @@ export class VaultSync {
       }
     }
     this.files.set(path, { k: "b", h: hash, t: Date.now() });
+    this.localHashes.set(path, hash);
     this.log(`pushed blob ${path} (${data.byteLength} bytes${already ? ", deduped" : ""})`);
     return true;
   }
@@ -594,7 +638,7 @@ export class VaultSync {
     this.mtimes.delete(oldPath);
     const h = await this.localHash(file);
     if (await this.push(file.path, h)) {
-      this.localHashes.set(file.path, h);
+      // push() owns localHashes (plain push -> h, merge -> merged hash).
       this.mtimes.set(file.path, file.stat.mtime);
     }
     this.log(`renamed ${oldPath} -> ${file.path}`);
