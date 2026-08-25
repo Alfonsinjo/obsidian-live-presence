@@ -3,11 +3,10 @@ import type { RemoteEntry } from "./types";
 
 export const ROSTER_VIEW_TYPE = "live-presence-roster";
 
-export interface SidebarSession {
-  startT: number;
-  endT: number;
+export interface SidebarDay {
+  day: string;
+  label: string;
   authors: string[];
-  index: number;
 }
 
 interface RosterCallbacks {
@@ -15,22 +14,19 @@ interface RosterCallbacks {
   getSelfId: () => number;
   onOpenFile: (path: string) => void;
   getActivePath: () => string | null;
-  onOpenHistory: () => void;
   onToggleAuthors: () => void;
   onClearOverlay: () => void;
-  overlayInfo: () => { mode: "authors" | "asof" | null };
-  loadFrames: (path: string) => Promise<{ times: number[]; sessions: SidebarSession[] }>;
-  onScrubTo: (index: number) => void;
+  overlayInfo: () => { mode: "authors" | "day" | null; day: string | null };
+  loadDays: (path: string) => Promise<SidebarDay[]>;
+  onSelectDay: (day: string) => void;
 }
 
-// Sidebar view: who is online (grouped by file), and below it the version
-// controls for the current note (author highlight, history, and a playback
-// scrubber over the recorded timeline).
+// Sidebar view: who is online (grouped by file), and below it the history of the
+// current note: author highlighting plus a per-day list of changes to review.
 export class RosterView extends ItemView {
   private presenceEl!: HTMLElement;
   private versionEl!: HTMLElement;
-  private frames: { path: string | null; times: number[]; sessions: SidebarSession[] } | null = null;
-  private playTimer: number | null = null;
+  private days: { path: string | null; list: SidebarDay[] | null } | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -55,14 +51,13 @@ export class RosterView extends ItemView {
     this.versionEl = this.contentEl.createDiv();
     this.renderPresence();
     this.renderVersions();
-    void this.ensureFrames(false);
+    void this.ensureDays(false);
   }
 
-  // Presence updates only re-render the presence section, so they never disturb
-  // the playback scrubber below.
+  // Presence updates only re-render the presence section.
   refresh(): void {
     this.renderPresence();
-    void this.ensureFrames(false);
+    void this.ensureDays(false);
   }
 
   // Called when the version/overlay state changed deliberately (button click).
@@ -70,27 +65,14 @@ export class RosterView extends ItemView {
     this.renderVersions();
   }
 
-  private stopPlay(): void {
-    if (this.playTimer !== null) {
-      window.clearInterval(this.playTimer);
-      this.playTimer = null;
-    }
-  }
-
-  private async ensureFrames(force: boolean): Promise<void> {
+  private async ensureDays(force: boolean): Promise<void> {
     const path = this.cb.getActivePath();
-    if (!force && this.frames?.path === path) return;
-    const res = path ? await this.cb.loadFrames(path) : { times: [], sessions: [] };
-    this.frames = { path, times: res.times, sessions: res.sessions };
+    if (!force && this.days?.path === path) return;
+    this.days = { path, list: null }; // loading
     this.renderVersions();
-  }
-
-  private sessionRange(s: SidebarSession): string {
-    const start = new Date(s.startT);
-    const end = new Date(s.endT);
-    const endStr =
-      start.toDateString() === end.toDateString() ? end.toLocaleTimeString() : end.toLocaleString();
-    return `${start.toLocaleString()} – ${endStr}`;
+    const list = path ? await this.cb.loadDays(path) : [];
+    this.days = { path, list };
+    this.renderVersions();
   }
 
   private iconButton(parent: HTMLElement, icon: string, label: string, active: boolean): HTMLElement {
@@ -151,7 +133,6 @@ export class RosterView extends ItemView {
 
   private renderVersions(): void {
     const root = this.versionEl;
-    this.stopPlay();
     root.empty();
     root.createEl("h4", { text: "Verlauf (aktuelle Notiz)", cls: "lp-section-top" });
 
@@ -169,98 +150,31 @@ export class RosterView extends ItemView {
     this.iconButton(actions, "users", "Autoren im Text hervorheben", info.mode === "authors").onClickEvent(
       () => this.cb.onToggleAuthors(),
     );
-    this.iconButton(actions, "history", "Verlauf (Sitzungen) öffnen", false).onClickEvent(() =>
-      this.cb.onOpenHistory(),
-    );
     if (info.mode) {
       this.iconButton(actions, "eye-off", "Hervorhebung im Text ausschalten", false).onClickEvent(() =>
         this.cb.onClearOverlay(),
       );
     }
 
-    const times = this.frames && this.frames.path === path ? this.frames.times : null;
-    if (times === null) {
+    const days = this.days && this.days.path === path ? this.days.list : null;
+    if (days === null) {
       root.createDiv({ cls: "lp-roster-empty", text: "Lade Verlauf …" });
       return;
     }
-    if (times.length <= 1) {
-      root.createDiv({ cls: "lp-roster-empty", text: "Noch kein aufgezeichneter Verlauf." });
+    if (days.length === 0) {
+      root.createDiv({ cls: "lp-roster-empty", text: "Noch keine aufgezeichneten Änderungen." });
       return;
     }
 
-    const max = times.length - 1;
-    const pb = root.createDiv({ cls: "lp-pb" });
-    const row = pb.createDiv({ cls: "lp-pb-row" });
-    const playBtn = this.iconButton(row, "play", "Verlauf abspielen", false);
-    const timeLabel = row.createSpan({ cls: "lp-pb-label" });
-
-    const slider = pb.createEl("input", { cls: "lp-pb-slider" });
-    slider.type = "range";
-    slider.min = "0";
-    slider.max = String(max);
-    slider.value = String(max);
-
-    const setLabel = (i: number) =>
-      timeLabel.setText(i >= max ? "aktueller Stand" : `Stand: ${new Date(times[i]).toLocaleString()}`);
-
-    slider.oninput = () => {
-      this.stopPlay();
-      setIcon(playBtn, "play");
-      const i = Number(slider.value);
-      setLabel(i);
-      this.cb.onScrubTo(i);
-    };
-
-    playBtn.onClickEvent(() => {
-      if (this.playTimer !== null) {
-        this.stopPlay();
-        setIcon(playBtn, "play");
-        return;
-      }
-      if (Number(slider.value) >= max) {
-        slider.value = "0";
-        setLabel(0);
-        this.cb.onScrubTo(0);
-      }
-      setIcon(playBtn, "pause");
-      this.playTimer = window.setInterval(() => {
-        let v = Number(slider.value);
-        if (v >= max) {
-          this.stopPlay();
-          setIcon(playBtn, "play");
-          return;
-        }
-        v += 1;
-        slider.value = String(v);
-        setLabel(v);
-        this.cb.onScrubTo(v);
-      }, 700);
-    });
-
-    setLabel(max);
-
-    // Clickable list of sessions; selecting one jumps the view to that point.
-    const sessions = this.frames && this.frames.path === path ? this.frames.sessions : [];
-    if (sessions.length > 0) {
-      root.createDiv({ cls: "lp-ver-hint", text: "Sitzungen (anklicken zum Ansehen):" });
-      const list = root.createDiv({ cls: "lp-ver-list" });
-      for (let i = sessions.length - 1; i >= 0; i--) {
-        const s = sessions[i];
-        const item = list.createDiv({ cls: "lp-ver-item lp-ver-clickable" });
-        item.createDiv({ cls: "lp-ver-when", text: this.sessionRange(s) });
-        item.createDiv({ cls: "lp-ver-by", text: s.authors.join(", ") });
-        item.onClickEvent(() => {
-          this.stopPlay();
-          setIcon(playBtn, "play");
-          slider.value = String(s.index);
-          setLabel(s.index);
-          this.cb.onScrubTo(s.index);
-        });
-      }
+    root.createDiv({ cls: "lp-ver-hint", text: "Änderungen nach Tag (anklicken zum Hervorheben):" });
+    const list = root.createDiv({ cls: "lp-ver-list" });
+    for (let i = days.length - 1; i >= 0; i--) {
+      const d = days[i];
+      const item = list.createDiv({ cls: "lp-ver-item lp-ver-clickable" });
+      if (info.mode === "day" && info.day === d.day) item.addClass("lp-btn-active");
+      item.createDiv({ cls: "lp-ver-when", text: d.label });
+      item.createDiv({ cls: "lp-ver-by", text: d.authors.join(", ") });
+      item.onClickEvent(() => this.cb.onSelectDay(d.day));
     }
-  }
-
-  async onClose(): Promise<void> {
-    this.stopPlay();
   }
 }

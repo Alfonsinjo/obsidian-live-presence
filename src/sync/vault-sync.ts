@@ -391,15 +391,22 @@ export class VaultSync {
   }
 
   private async writeText(path: string, content: string): Promise<void> {
-    this.localHashes.set(path, hashString(content));
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) {
       const current = normalizeLineEndings(await this.app.vault.read(existing));
       if (current === content) return;
+      // Safety net: never blank a non-empty note through synchronisation.
+      if (content.length === 0 && current.length > 0) {
+        this.log(`refused to blank ${path} via sync`);
+        return;
+      }
+      this.localHashes.set(path, hashString(content));
       await this.app.vault.modify(existing, content);
       this.mtimes.set(path, existing.stat.mtime);
       this.log(`wrote text ${path} (${content.length} chars)`);
     } else {
+      if (content.length === 0) return; // do not create empty notes through sync
+      this.localHashes.set(path, hashString(content));
       await this.ensureFolder(path);
       await this.app.vault.create(path, content);
       this.log(`created text ${path} (${content.length} chars)`);

@@ -1,21 +1,18 @@
 import { EditorView } from "@codemirror/view";
 import { MarkdownView, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
-import { type AuthorRun, readAuthorRuns } from "./blame";
-import { BlameModal } from "./blame-modal";
-import { type Frame, buildFrames, buildSessions, listChangelog } from "./changelog";
+import { listChangelog } from "./changelog";
 import { CollabBinding } from "./collab/binding";
-import { diffLines } from "./history";
-import { SessionTimelineModal } from "./session-modal";
-import { type FadedRange, type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
+import { type DayInfo, type TimedRun, reconstructHistory } from "./history-blame";
+import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
 import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
 import { fetchProfileName, saveProfileName } from "./profile";
 import { type RemoteCursor, remoteCursorsField, setRemoteCursors } from "./remote-cursors";
-import { ROSTER_VIEW_TYPE, RosterView, type SidebarSession } from "./roster-view";
+import { ROSTER_VIEW_TYPE, RosterView } from "./roster-view";
 import { LivePresenceSettingTab } from "./settings";
 import { VaultSync } from "./sync/vault-sync";
 import { DEFAULT_SETTINGS, type LivePresenceSettings } from "./types";
-import { colorFromName, debounce, sleep, withAlpha } from "./utils";
+import { colorFromName, debounce, withAlpha } from "./utils";
 
 // Obsidian exposes the underlying CodeMirror 6 view as editor.cm (undocumented but stable).
 function getCmView(view: MarkdownView): EditorView | undefined {
@@ -35,10 +32,10 @@ export default class LivePresencePlugin extends Plugin {
   // Full name resolved from the profile database.
   private displayName = "";
   // In-editor history overlay state.
-  private overlayMode: "authors" | "asof" | null = null;
-  // Cached reconstructed frames and author runs of the current note, for the
-  // timeline scrubber and author colouring.
-  private framesCache: { path: string; frames: Frame[]; authorRuns: AuthorRun[] | null } | null = null;
+  private overlayMode: "authors" | "day" | null = null;
+  private overlayDay: string | null = null;
+  // Cached time-aware blame of the current note (per-author, per-day runs).
+  private historyCache: { path: string; runs: TimedRun[]; days: DayInfo[] } | null = null;
 
   private reportCursor = debounce((anchor: number, head: number, docLen: number) => {
     this.presence?.setCursor({ anchor, head, docLen });
@@ -64,12 +61,11 @@ export default class LivePresencePlugin extends Plugin {
           getSelfId: () => this.presence.clientId,
           onOpenFile: (path) => this.app.workspace.openLinkText(path, "", false),
           getActivePath: () => this.activePath(),
-          onOpenHistory: () => this.showHistory(),
           onToggleAuthors: () => void this.toggleAuthorsOverlay(),
           onClearOverlay: () => this.clearOverlay(),
           overlayInfo: () => this.overlayInfo(),
-          loadFrames: (path) => this.loadFrames(path),
-          onScrubTo: (index) => this.showAsOfOverlay(index),
+          loadDays: (path) => this.loadHistory(path),
+          onSelectDay: (day) => void this.showDayOverlay(day),
         }),
     );
 
@@ -98,17 +94,10 @@ export default class LivePresencePlugin extends Plugin {
       name: "Roster öffnen (wer ist gerade im Vault)",
       callback: () => this.activateRoster(),
     });
-    this.addRibbonIcon("history", "Live Presence: Autoren dieser Notiz", () => this.showBlame());
     this.addCommand({
-      id: "lp-show-blame",
-      name: "Autoren dieser Notiz anzeigen (wer hat was geschrieben)",
-      callback: () => this.showBlame(),
-    });
-    this.addRibbonIcon("git-compare", "Live Presence: Verlauf dieser Notiz", () => this.showHistory());
-    this.addCommand({
-      id: "lp-show-history",
-      name: "Verlauf dieser Notiz anzeigen (Versionen und Änderungen)",
-      callback: () => this.showHistory(),
+      id: "lp-toggle-authors",
+      name: "Autoren im Text ein-/ausblenden (wer hat was geschrieben)",
+      callback: () => void this.toggleAuthorsOverlay(),
     });
 
     this.app.workspace.onLayoutReady(() => {
@@ -420,83 +409,53 @@ export default class LivePresencePlugin extends Plugin {
     }
   }
 
-  private showBlame(): void {
-    const path = this.activePath();
-    if (!path) {
-      new Notice("Live Presence: Keine aktive Notiz.");
-      return;
-    }
-    if (!this.settings.serverUrl) {
-      new Notice("Live Presence: Bitte die Server-URL in den Einstellungen eintragen.");
-      return;
-    }
-    new BlameModal(this.app, this.settings.serverUrl, this.effectiveAuth(), path).open();
-  }
-
   // Path of the current note (Markdown only), even when a sidebar has focus.
   private activePath(): string | null {
     const file = this.app.workspace.getActiveFile();
     return file && file.extension === "md" ? file.path : null;
   }
 
-  // Load and cache the reconstructed timeline frames for a note; returns the
-  // timestamp of each frame for the sidebar scrubber labels.
-  private async loadFrames(path: string): Promise<{ times: number[]; sessions: SidebarSession[] }> {
+  // Load and cache the time-aware blame of a note; returns the days with changes.
+  private async loadHistory(path: string): Promise<DayInfo[]> {
     if (!this.settings.serverUrl) {
-      this.framesCache = null;
-      return { times: [], sessions: [] };
+      this.historyCache = null;
+      return [];
     }
-    const auth = this.effectiveAuth();
-    const entries = await listChangelog(this.settings.serverUrl, auth, path);
-    const frames = buildFrames(entries);
-    const authorRuns = await readAuthorRuns(this.settings.serverUrl, auth, path);
-    this.framesCache = { path, frames, authorRuns };
-    const sessions: SidebarSession[] = buildSessions(entries, 10 * 60 * 1000).map((s) => ({
-      startT: s.startT,
-      endT: s.endT,
-      authors: s.authors,
-      index: s.endIndex,
-    }));
-    return { times: frames.map((f) => f.t), sessions };
+    const entries = await listChangelog(this.settings.serverUrl, this.effectiveAuth(), path);
+    const { runs, days } = reconstructHistory(entries);
+    this.historyCache = { path, runs, days };
+    return days;
   }
 
-  // Map author runs to coloured overlay runs, aligned to the editor by length.
-  private buildAuthorOverlay(
-    authorRuns: AuthorRun[],
+  // Colour the current text by author, aligned to the editor by length. When a
+  // day is given, only the runs written on that day are coloured.
+  private buildBlameOverlay(
+    runs: TimedRun[],
     docLen: number,
+    dayFilter?: string,
   ): { runs: OverlayRun[]; legend: { label: string; color: string }[] } | null {
-    const total = authorRuns.reduce((n, r) => n + r.text.length, 0);
+    const total = runs.reduce((n, r) => n + r.text.length, 0);
     if (total !== docLen) return null;
     let pos = 0;
-    const runs: OverlayRun[] = [];
+    const oruns: OverlayRun[] = [];
     const legend = new Map<string, string>();
-    for (const r of authorRuns) {
+    for (const r of runs) {
       const from = pos;
       const to = pos + r.text.length;
       pos = to;
-      if (to > from) runs.push({ from, to, color: withAlpha(r.color, 0.28), label: r.name });
+      const day = new Date(r.t).toDateString();
+      if (dayFilter && day !== dayFilter) continue;
+      if (to > from) {
+        oruns.push({
+          from,
+          to,
+          color: withAlpha(r.color, 0.3),
+          label: `${r.name} · ${new Date(r.t).toLocaleDateString()}`,
+        });
+      }
       if (!legend.has(r.name)) legend.set(r.name, r.color);
     }
-    return { runs, legend: [...legend].map(([label, color]) => ({ label, color })) };
-  }
-
-  // Remove the hidden ranges from the coloured runs, so background colouring and
-  // collapsed (hidden) text never overlap.
-  private clipRuns(runs: OverlayRun[], faded: FadedRange[]): OverlayRun[] {
-    const out: OverlayRun[] = [];
-    for (const run of runs) {
-      let cursor = run.from;
-      for (const h of faded) {
-        if (h.to <= cursor) continue;
-        if (h.from >= run.to) break;
-        const visTo = Math.min(h.from, run.to);
-        if (visTo > cursor) out.push({ ...run, from: cursor, to: visTo });
-        cursor = Math.min(h.to, run.to);
-        if (cursor >= run.to) break;
-      }
-      if (cursor < run.to) out.push({ ...run, from: cursor, to: run.to });
-    }
-    return out;
+    return { runs: oruns, legend: [...legend].map(([label, color]) => ({ label, color })) };
   }
 
   // Editor of the current note, found by file rather than focus, so it also
@@ -517,13 +476,14 @@ export default class LivePresencePlugin extends Plugin {
     }
   }
 
-  overlayInfo(): { mode: "authors" | "asof" | null } {
-    return { mode: this.overlayMode };
+  overlayInfo(): { mode: "authors" | "day" | null; day: string | null } {
+    return { mode: this.overlayMode, day: this.overlayDay };
   }
 
   clearOverlay(): void {
     this.activeCmView()?.dispatch({ effects: setOverlay.of(null) });
     this.overlayMode = null;
+    this.overlayDay = null;
     this.refreshRosters();
   }
 
@@ -532,131 +492,45 @@ export default class LivePresencePlugin extends Plugin {
       this.clearOverlay();
       return;
     }
-    await this.applyAuthorsOverlay(false);
+    await this.applyOverlay(undefined, false);
   }
 
-  private async applyAuthorsOverlay(silent: boolean): Promise<void> {
+  async showDayOverlay(day: string): Promise<void> {
+    await this.applyOverlay(day, false);
+  }
+
+  // Colour the note by author (dayFilter undefined) or highlight only one day's
+  // changes. The blame comes from the change log, aligned to the editor.
+  private async applyOverlay(dayFilter: string | undefined, silent: boolean): Promise<void> {
     const path = this.activePath();
-    if (!path || !this.settings.serverUrl) {
+    if (!path || !this.settings.serverUrl || !this.activeCmView()) {
       if (!silent) new Notice("Live Presence: Keine aktive Notiz.");
       return;
     }
+    if (!this.historyCache || this.historyCache.path !== path) await this.loadHistory(path);
+    const cache = this.historyCache;
     const cm = this.activeCmView();
-    if (!cm) {
-      if (!silent) new Notice("Live Presence: Keine aktive Notiz.");
-      return;
-    }
-    // The authorship comes from the shared document; align it to the editor by
-    // length. Retry once in case the document is still catching up.
-    let runs = null as Awaited<ReturnType<typeof readAuthorRuns>>;
-    let aligned = false;
-    for (let attempt = 0; attempt < 2 && !aligned; attempt++) {
-      if (attempt > 0) await sleep(700);
-      runs = await readAuthorRuns(this.settings.serverUrl, this.effectiveAuth(), path);
-      if (!runs) {
-        if (!silent) new Notice("Live Presence: Nicht mit dem Server verbunden.");
-        return;
-      }
-      const total = runs.reduce((n, r) => n + r.text.length, 0);
-      aligned = total === cm.state.doc.length;
-    }
-    if (!runs || !aligned) {
-      if (!silent) new Notice("Live Presence: Autoren konnten nicht zugeordnet werden (Text nicht synchron).");
-      return;
-    }
-    const built = this.buildAuthorOverlay(runs, cm.state.doc.length);
+    if (!cache || cache.path !== path || !cm) return;
+    const built = this.buildBlameOverlay(cache.runs, cm.state.doc.length, dayFilter);
     if (!built) {
-      if (!silent) new Notice("Live Presence: Autoren konnten nicht zugeordnet werden (Text nicht synchron).");
+      if (!silent) new Notice("Live Presence: Verlauf noch nicht synchron – kurz warten und erneut versuchen.");
       return;
     }
-    cm.dispatch({
-      effects: setOverlay.of({ runs: built.runs, faded: [], legend: built.legend, title: "Autoren" }),
-    });
-    this.overlayMode = "authors";
+    const title = dayFilter ? `Änderungen am ${new Date(dayFilter).toLocaleDateString()}` : "Autoren";
+    cm.dispatch({ effects: setOverlay.of({ runs: built.runs, faded: [], legend: built.legend, title }) });
+    this.overlayMode = dayFilter ? "day" : "authors";
+    this.overlayDay = dayFilter ?? null;
     this.refreshRosters();
   }
 
-  // Show the document as of the frame at the given index: hide the lines added
-  // after that time and colour the remaining text by author. Driven by the
-  // sidebar scrubber, so it does not re-render the sidebar.
-  showAsOfOverlay(index: number): void {
-    const cm = this.activeCmView();
-    const cache = this.framesCache;
-    if (!cm || !cache || cache.path !== this.activePath()) return;
-    if (index < 0 || index >= cache.frames.length) return;
-    if (index >= cache.frames.length - 1) {
-      cm.dispatch({ effects: setOverlay.of(null) }); // "now": nothing to hide
-      this.overlayMode = null;
-      return;
-    }
-    const faded = this.addedLineRanges(cache.frames[index].text, cm.state.doc.toString());
-    let runs: OverlayRun[] = [];
-    let legend: { label: string; color: string }[] = [];
-    if (cache.authorRuns) {
-      const built = this.buildAuthorOverlay(cache.authorRuns, cm.state.doc.length);
-      if (built) {
-        runs = this.clipRuns(built.runs, faded);
-        legend = built.legend;
-      }
-    }
-    cm.dispatch({
-      effects: setOverlay.of({
-        runs,
-        faded,
-        legend,
-        title: `Stand: ${new Date(cache.frames[index].t).toLocaleString()}`,
-      }),
-    });
-    this.overlayMode = "asof";
-  }
-
-  // Ranges (including the trailing newline) of lines present in the current text
-  // but not in the old one, i.e. added later and greyed out for an older view.
-  private addedLineRanges(oldText: string, newText: string): FadedRange[] {
-    const lines = newText.split("\n");
-    const starts: number[] = [];
-    let off = 0;
-    for (const line of lines) {
-      starts.push(off);
-      off += line.length + 1;
-    }
-    const docLen = newText.length;
-    const ops = diffLines(oldText, newText);
-    const faded: FadedRange[] = [];
-    let j = 0;
-    for (const op of ops) {
-      if (op.type === "removed") continue;
-      if (op.type === "added") {
-        const from = starts[j];
-        const to = Math.min(from + (lines[j]?.length ?? 0) + 1, docLen);
-        if (to > from) faded.push({ from, to });
-      }
-      j++;
-    }
-    return faded;
-  }
-
   private reapplyOverlayOnLeafChange(): void {
-    this.framesCache = null; // frames are per note
+    this.historyCache = null; // blame is per note
     if (!this.overlayMode) return;
-    if (!this.activePath() || this.overlayMode === "asof") {
+    if (!this.activePath() || this.overlayMode === "day") {
       this.clearOverlay();
       return;
     }
-    void this.applyAuthorsOverlay(true);
-  }
-
-  private showHistory(): void {
-    const path = this.activePath();
-    if (!path) {
-      new Notice("Live Presence: Keine aktive Notiz.");
-      return;
-    }
-    if (!this.settings.serverUrl) {
-      new Notice("Live Presence: Bitte die Server-URL in den Einstellungen eintragen.");
-      return;
-    }
-    new SessionTimelineModal(this.app, this.settings.serverUrl, this.effectiveAuth(), path).open();
+    void this.applyOverlay(undefined, true);
   }
 
   async activateRoster(): Promise<void> {

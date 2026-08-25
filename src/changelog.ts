@@ -1,44 +1,14 @@
 import { requestUrl } from "obsidian";
-import * as Y from "yjs";
 import { authHeader, couchBase } from "./profile";
-import { base64ToBytes } from "./utils";
 
-// Reads the append-only change log written by the server (one merged entry per
-// short time window) and groups it into meaningful editing sessions.
+// Reads the append-only change log written by the server (one merged Yjs update
+// per short time window).
 const CHANGELOG_DB = "ksk_changelog";
 
 export interface ChangeEntry {
   t0: number;
   t1: number;
   u: string; // base64-encoded merged Yjs update
-}
-
-export interface Session {
-  startT: number;
-  endT: number;
-  authors: string[];
-  startText: string;
-  endText: string;
-  // Frame index (number of changes) at the end of this session, for the scrubber.
-  endIndex: number;
-}
-
-export interface Frame {
-  t: number;
-  text: string;
-}
-
-// Reconstruct the document text after each logged change, for a time scrubber.
-// Frame 0 is the empty starting state; frame k is the text after k changes.
-export function buildFrames(entries: ChangeEntry[]): Frame[] {
-  const doc = new Y.Doc({ gc: false });
-  const text = doc.getText("content");
-  const frames: Frame[] = [{ t: entries.length ? entries[0].t0 : 0, text: "" }];
-  for (const e of entries) {
-    Y.applyUpdate(doc, base64ToBytes(e.u));
-    frames.push({ t: e.t1, text: text.toString() });
-  }
-  return frames;
 }
 
 export async function listChangelog(
@@ -72,56 +42,4 @@ export async function listChangelog(
   } catch {
     return [];
   }
-}
-
-// Replay the log to derive, per session, the text before and after it and the
-// set of contributing authors. Sessions are split on inactivity gaps.
-export function buildSessions(entries: ChangeEntry[], gapMs: number): Session[] {
-  if (entries.length === 0) return [];
-
-  const groups: ChangeEntry[][] = [];
-  let current: ChangeEntry[] = [entries[0]];
-  for (let i = 1; i < entries.length; i++) {
-    if (entries[i].t0 - current[current.length - 1].t1 > gapMs) {
-      groups.push(current);
-      current = [entries[i]];
-    } else {
-      current.push(entries[i]);
-    }
-  }
-  groups.push(current);
-
-  const doc = new Y.Doc({ gc: false });
-  const text = doc.getText("content");
-  const authors = doc.getMap("authors");
-  const sessions: Session[] = [];
-  let prevText = "";
-  let applied = 0;
-
-  for (const group of groups) {
-    const clients = new Set<number>();
-    for (const e of group) {
-      const update = base64ToBytes(e.u);
-      Y.applyUpdate(doc, update);
-      applied++;
-      const sv = Y.decodeStateVector(Y.encodeStateVectorFromUpdate(update));
-      for (const client of sv.keys()) clients.add(client);
-    }
-    const names = new Set<string>();
-    for (const client of clients) {
-      const a = authors.get(String(client)) as { name?: string } | undefined;
-      names.add(a?.name || "Unbekannt");
-    }
-    const endText = text.toString();
-    sessions.push({
-      startT: group[0].t0,
-      endT: group[group.length - 1].t1,
-      authors: [...names],
-      startText: prevText,
-      endText,
-      endIndex: applied,
-    });
-    prevText = endText;
-  }
-  return sessions;
 }
