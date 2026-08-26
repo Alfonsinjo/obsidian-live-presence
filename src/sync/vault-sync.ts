@@ -98,7 +98,7 @@ export class VaultSync {
     private getUser: () => { name: string; color: string },
     private loadBaseHashes: () => Promise<Record<string, string>>,
     private saveBaseHashes: (record: Record<string, string>) => void,
-    private onConflict: (path: string, result: MergeResult) => Promise<"merge" | "discard">,
+    private onConflict: (path: string, result: MergeResult) => Promise<"mine" | "theirs">,
     private log: (...args: unknown[]) => void,
   ) {}
 
@@ -310,20 +310,19 @@ export class VaultSync {
         base = reconstructBase(entries, baseHash) ?? "";
       }
 
-      const result = mergeThreeWay(base, local, remote);
-      if (result.conflicts.length === 0) {
+      // Probe pass: find the overlapping regions without writing markers.
+      const probe = mergeThreeWay(base, local, remote, "detect");
+      if (probe.conflicts.length === 0) {
+        // No overlap: combine both sides automatically.
         this.log(`auto-merged ${path}`);
-        await this.applyMerged(path, result.text);
+        await this.applyMerged(path, probe.text);
         return;
       }
-      const action = await this.onConflict(path, result);
-      if (action === "merge") {
-        await this.applyMerged(path, result.text);
-      } else {
-        // Keep only local; push it raw so the shared copy matches.
-        const h = hashString(local);
-        await this.pushTextRaw(path, h, local);
-      }
+      // Overlap: let the user pick a winning side, then write it cleanly.
+      const action = await this.onConflict(path, probe);
+      const resolved = mergeThreeWay(base, local, remote, action === "theirs" ? "theirs" : "mine");
+      this.log(`resolved conflict in ${path} -> ${action}`);
+      await this.applyMerged(path, resolved.text);
     } finally {
       this.conflictsInProgress.delete(path);
     }

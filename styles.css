@@ -90,12 +90,20 @@
 /* Konflikt-Popup */
 .lp-conflict-block {
   display: flex;
-  gap: 10px;
-  margin: 10px 0;
+  flex-direction: column;
+  gap: 4px;
+  margin: 14px 0;
+  padding: 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
 }
-.lp-conflict-side {
-  flex: 1 1 0;
+.lp-conflict-row {
   min-width: 0;
+}
+.lp-conflict-arrow {
+  font-size: 0.78em;
+  color: var(--text-muted);
+  margin: 4px 0 2px;
 }
 .lp-conflict-label {
   font-size: 0.8em;

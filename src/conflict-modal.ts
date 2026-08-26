@@ -1,8 +1,9 @@
 import { type App, Modal } from "obsidian";
 import type { MergeResult } from "./merge";
 
-// Shown when a note was changed on both sides at the same lines. Lets the user
-// merge (keeping both, with markers) or keep only their own version.
+// Shown when a note was changed on both sides at the same lines. The user picks
+// one side; the chosen version replaces the spot cleanly (no markers are ever
+// written into the document).
 export class ConflictModal extends Modal {
   private decided = false;
 
@@ -10,7 +11,7 @@ export class ConflictModal extends Modal {
     app: App,
     private path: string,
     private result: MergeResult,
-    private onResolve: (action: "merge" | "discard") => void,
+    private onResolve: (action: "mine" | "theirs") => void,
   ) {
     super(app);
   }
@@ -19,31 +20,41 @@ export class ConflictModal extends Modal {
     const { contentEl, titleEl } = this;
     titleEl.setText(`Konflikt: ${this.path}`);
     contentEl.createEl("p", {
-      text: "Diese Notiz wurde gleichzeitig an denselben Stellen geändert. Nicht überlappende Änderungen wurden bereits automatisch zusammengeführt. Für die folgenden Stellen bitte entscheiden:",
+      text:
+        "Dieselben Zeilen wurden von dir und einer anderen Person gleichzeitig unterschiedlich geändert. " +
+        "Nicht überlappende Änderungen wurden bereits automatisch übernommen. Bitte für die folgende(n) Stelle(n) entscheiden:",
     });
 
     for (const c of this.result.conflicts) {
       const block = contentEl.createDiv({ cls: "lp-conflict-block" });
-      const mine = block.createDiv({ cls: "lp-conflict-side" });
+
+      const other = block.createDiv({ cls: "lp-conflict-row" });
+      other.createDiv({ cls: "lp-conflict-label", text: "Andere Version (aktuell im Dokument)" });
+      other.createEl("pre", { cls: "lp-conflict-other", text: c.remote.join("\n") || "(leer)" });
+
+      block.createDiv({ cls: "lp-conflict-arrow", text: "↓ beim Übernehmen ersetzt durch" });
+
+      const mine = block.createDiv({ cls: "lp-conflict-row" });
       mine.createDiv({ cls: "lp-conflict-label", text: "Deine Version" });
       mine.createEl("pre", { cls: "lp-conflict-mine", text: c.local.join("\n") || "(leer)" });
-      const other = block.createDiv({ cls: "lp-conflict-side" });
-      other.createDiv({ cls: "lp-conflict-label", text: "Andere Version" });
-      other.createEl("pre", { cls: "lp-conflict-other", text: c.remote.join("\n") || "(leer)" });
     }
 
     const actions = contentEl.createDiv({ cls: "lp-conflict-actions" });
-    const mergeBtn = actions.createEl("button", { text: "Zusammenführen (beide behalten)", cls: "mod-cta" });
-    mergeBtn.onClickEvent(() => this.finish("merge"));
-    actions.createEl("button", { text: "Meine Version behalten" }).onClickEvent(() => this.finish("discard"));
+    const mineBtn = actions.createEl("button", { text: "Deine Version übernehmen", cls: "mod-cta" });
+    mineBtn.onClickEvent(() => this.finish("mine"));
+    actions
+      .createEl("button", { text: "Verwerfen (andere Version behalten)" })
+      .onClickEvent(() => this.finish("theirs"));
 
     contentEl.createEl("p", {
       cls: "lp-conflict-hint",
-      text: "Beim Zusammenführen bleiben beide Fassungen mit Markierungen (<<<<<<< / >>>>>>>) erhalten, sodass nichts verloren geht.",
+      text:
+        "Übernehmen ersetzt die Stelle sauber durch deine Version. Verwerfen behält die andere Version. " +
+        "Es werden keine Markierungen ins Dokument geschrieben; die jeweils andere Fassung bleibt im Verlauf erhalten.",
     });
   }
 
-  private finish(action: "merge" | "discard"): void {
+  private finish(action: "mine" | "theirs"): void {
     if (this.decided) return;
     this.decided = true;
     this.onResolve(action);
@@ -51,10 +62,11 @@ export class ConflictModal extends Modal {
   }
 
   onClose(): void {
-    // Default to a lossless merge if the user closes without choosing.
+    // If closed without choosing, keep the user's own version (their work is
+    // preserved; the other side stays recoverable from the change log).
     if (!this.decided) {
       this.decided = true;
-      this.onResolve("merge");
+      this.onResolve("mine");
     }
     this.contentEl.empty();
   }

@@ -298,7 +298,9 @@ export default class LivePresencePlugin extends Plugin {
       () => this.loadBaseHashes(),
       (record) => this.saveBaseHashes(record),
       (path, result) =>
-        new Promise((resolve) => new ConflictModal(this.app, path, result, resolve).open()),
+        new Promise<"mine" | "theirs">((resolve) =>
+          new ConflictModal(this.app, path, result, resolve).open(),
+        ),
       () => {}, // logging silenced for normal operation
     );
     void this.vaultSync.start();

@@ -1,10 +1,16 @@
 // Line-based three-way merge (git style). Non-overlapping changes from both
-// sides are combined automatically; overlapping changes are reported as
-// conflicts and marked in the text so nothing is ever lost.
+// sides are always combined automatically. Overlapping changes are reported as
+// conflicts; how they are written into the text depends on the resolution:
+//   "detect" - a probe pass that only collects the conflicts (text unusable)
+//   "mine"   - the local lines win, cleanly (no markers)
+//   "theirs" - the remote lines win, cleanly (no markers)
+
+export type Resolution = "detect" | "mine" | "theirs";
 
 export interface MergeConflict {
-  local: string[];
-  remote: string[];
+  base: string[]; // common ancestor lines at this spot (may be empty)
+  local: string[]; // our lines
+  remote: string[]; // the other side's lines
 }
 
 export interface MergeResult {
@@ -49,7 +55,12 @@ function arrEq(a: string[], b: string[]): boolean {
   return true;
 }
 
-export function mergeThreeWay(base: string, local: string, remote: string): MergeResult {
+export function mergeThreeWay(
+  base: string,
+  local: string,
+  remote: string,
+  resolution: Resolution = "detect",
+): MergeResult {
   const b = base.length ? base.split("\n") : [];
   const l = local.split("\n");
   const r = remote.split("\n");
@@ -84,12 +95,10 @@ export function mergeThreeWay(base: string, local: string, remote: string): Merg
     else if (!localChanged && remoteChanged) out.push(...rc);
     else if (arrEq(lc, rc)) out.push(...lc);
     else {
-      conflicts.push({ local: lc, remote: rc });
-      out.push("<<<<<<< Deine Version");
-      out.push(...lc);
-      out.push("=======");
-      out.push(...rc);
-      out.push(">>>>>>> Andere Version");
+      // Overlapping change: record it and write the chosen side cleanly.
+      conflicts.push({ base: bc, local: lc, remote: rc });
+      if (resolution === "theirs") out.push(...rc);
+      else out.push(...lc); // "mine" and "detect" both keep local as the placeholder
     }
   };
 
