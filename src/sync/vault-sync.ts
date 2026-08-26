@@ -204,6 +204,13 @@ export class VaultSync {
       .some((l) => (l.view as unknown as { file?: TFile }).file?.path === path);
   }
 
+  // Last-synced content hash for a path, used by the co-editing binding as the
+  // common ancestor when it takes over an open note that diverged from the
+  // shared copy (so it can merge instead of overwrite).
+  getBaseHash(path: string): string | undefined {
+    return this.localHashes.get(path);
+  }
+
   private async localHash(file: TFile): Promise<string> {
     if (this.kindOf(file.path) === "t") {
       return hashString(normalizeLineEndings(await this.app.vault.read(file)));

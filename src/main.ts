@@ -27,7 +27,6 @@ export default class LivePresencePlugin extends Plugin {
   private binding = new CollabBinding();
   private vaultSync: VaultSync | null = null;
   private coeditEngageTimer: number | null = null;
-  private coeditDisengageTimer: number | null = null;
   private statusBarEl!: HTMLElement;
   // Persistent red toast shown while the connection is down.
   private offlineNotice: Notice | null = null;
@@ -162,54 +161,30 @@ export default class LivePresencePlugin extends Plugin {
       return;
     }
 
-    const participants = this.presence.getAll().filter((e) => e.state.file === file).length;
-
-    if (participants >= 2) {
-      if (this.coeditDisengageTimer !== null) {
-        window.clearTimeout(this.coeditDisengageTimer);
-        this.coeditDisengageTimer = null;
+    // The binding owns the active markdown note whenever it is open, regardless
+    // of how many people are present. This makes it the single authority for
+    // open notes; whole-vault sync handles only closed files. Do not attempt to
+    // engage while our connection is down - vault sync covers offline opens, and
+    // a bound note that goes offline is kept alive by the reconnect merge.
+    if (this.binding.isActive(file) || this.coeditEngageTimer !== null) return;
+    if (!this.presence.isConnected()) return;
+    this.coeditEngageTimer = window.setTimeout(() => {
+      this.coeditEngageTimer = null;
+      const v = this.app.workspace.getActiveViewOfType(MarkdownView);
+      const c = v ? getCmView(v) : undefined;
+      const f = v?.file?.path ?? null;
+      if (f === file && c && v && !this.isExcalidraw(v) && !this.binding.isActive(f)) {
+        void this.binding.engage(
+          c,
+          f,
+          this.settings.serverUrl,
+          this.effectiveAuth(),
+          this.effectiveUser(),
+          (p, result) => this.resolveConflict(p, result),
+          (p) => this.vaultSync?.getBaseHash(p),
+        );
       }
-      if (!this.binding.isActive(file) && this.coeditEngageTimer === null) {
-        this.coeditEngageTimer = window.setTimeout(() => {
-          this.coeditEngageTimer = null;
-          const v = this.app.workspace.getActiveViewOfType(MarkdownView);
-          const c = v ? getCmView(v) : undefined;
-          const f = v?.file?.path ?? null;
-          if (
-            f === file &&
-            c &&
-            !this.binding.isActive(f) &&
-            this.presence.getAll().filter((e) => e.state.file === f).length >= 2
-          ) {
-            void this.binding.engage(
-              c,
-              f,
-              this.settings.serverUrl,
-              this.effectiveAuth(),
-              this.effectiveUser(),
-              (p, result) => this.resolveConflict(p, result),
-            );
-          }
-        }, 500);
-      }
-    } else if (
-      this.binding.isActive(file) &&
-      !this.binding.isOffline() &&
-      this.coeditDisengageTimer === null
-    ) {
-      this.coeditDisengageTimer = window.setTimeout(() => {
-        this.coeditDisengageTimer = null;
-        const p = this.binding.path;
-        // Keep the binding alive while WE are offline: presence looks empty only
-        // because we cannot see anyone. Tearing it down here would let both the
-        // vault sync and a fresh engage() touch the note on reconnect and append
-        // instead of replace. The reconnect line-merge owns re-entry instead.
-        if (this.binding.isOffline()) return;
-        if (p && this.presence.getAll().filter((e) => e.state.file === p).length < 2) {
-          void this.binding.disengage();
-        }
-      }, 5000);
-    }
+    }, 300);
   }
 
   private effectiveUser(): { name: string; color: string } {

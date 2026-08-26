@@ -4,10 +4,12 @@ import { Notice } from "obsidian";
 import { yCollab } from "y-codemirror.next";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
+import { listChangelog, reconstructBase } from "../changelog";
 import { type MergeResult, mergeThreeWay } from "../merge";
 import {
   applyMinimalCmUpdate,
   applyMinimalYTextUpdate,
+  hashString,
   normalizeLineEndings,
   registerAuthor,
   sleep,
@@ -24,6 +26,7 @@ interface User {
 }
 
 type ConflictResolver = (path: string, result: MergeResult) => Promise<"mine" | "theirs">;
+type BaseHashLookup = (path: string) => string | undefined;
 
 // Binds one file's editor to a shared Y.Text so edits are character-by-character
 // real-time with correct (relative-position) remote cursors. One file at a time.
@@ -37,6 +40,9 @@ export class CollabBinding {
 
   private user: User | null = null;
   private onConflict: ConflictResolver | null = null;
+  private serverUrl = "";
+  private auth: Auth | null = null;
+  private getBaseHash: BaseHashLookup | null = null;
   // Offline handling: while disconnected we detach the live CRDT so our edits
   // stay a clean local version, then line-merge on reconnect instead of letting
   // Yjs interleave two people's same-line edits into one mashed line.
@@ -68,6 +74,7 @@ export class CollabBinding {
     auth: Auth,
     user: User,
     onConflict?: ConflictResolver,
+    getBaseHash?: BaseHashLookup,
   ): Promise<void> {
     await this.disengage();
     const gen = ++this.gen;
@@ -85,6 +92,9 @@ export class CollabBinding {
       this.path = path;
       this.user = user;
       this.onConflict = onConflict ?? null;
+      this.serverUrl = serverUrl;
+      this.auth = auth;
+      this.getBaseHash = getBaseHash ?? null;
       this.everSynced = false;
       this.offline = false;
 
@@ -105,12 +115,13 @@ export class CollabBinding {
       });
       registerAuthor(doc, user);
 
-      // Reconcile editor <-> shared text. CRITICAL: never clear a non-empty editor.
+      // Reconcile editor <-> shared text. CRITICAL: never clear a non-empty
+      // editor and never blindly overwrite local edits.
       const local = normalizeLineEndings(view.state.doc.toString());
-      if (text.length > 0) {
-        // Shared text already has content -> adopt it into the editor.
-        applyMinimalCmUpdate(view, text.toString());
-      } else if (local.length > 0) {
+      const remote0 = text.toString();
+      if (remote0 === local) {
+        // Already identical: nothing to reconcile.
+      } else if (remote0.length === 0 && local.length > 0) {
         // Shared text is empty but we have content. Wait briefly for a peer to seed it,
         // then adopt; otherwise seed from our own content. Never wipe the editor.
         await sleep(400);
@@ -124,13 +135,22 @@ export class CollabBinding {
             if (this.gen !== gen || this.destroyed(view)) return;
           }
         }
-        if (text.length > 0) {
-          applyMinimalCmUpdate(view, text.toString());
-        } else {
-          applyMinimalYTextUpdate(doc, text, local);
-        }
+        if (text.length > 0) applyMinimalCmUpdate(view, text.toString());
+        else applyMinimalYTextUpdate(doc, text, local);
+      } else if (local.length === 0) {
+        // Editor empty, shared has content -> adopt it.
+        applyMinimalCmUpdate(view, remote0);
+      } else {
+        // Both sides have content and differ. Do NOT overwrite: line-merge
+        // against the last-synced base (which may have diverged while this note
+        // was edited elsewhere or closed here), then publish the result.
+        const base = await this.resolveBase(path, local, remote0);
+        if (this.gen !== gen || this.destroyed(view)) return;
+        const merged = await this.mergeShared(path, base, local, remote0);
+        if (this.gen !== gen || this.destroyed(view)) return;
+        applyMinimalCmUpdate(view, merged);
+        applyMinimalYTextUpdate(doc, text, merged);
       }
-      // If both are empty there is nothing to reconcile.
       if (this.gen !== gen || this.destroyed(view)) return;
 
       this.bindEditor();
@@ -181,8 +201,7 @@ export class CollabBinding {
   }
 
   // Back online: three-way merge the common base (state at disconnect), our
-  // editor content, and the freshly synced shared text. Overlapping same-line
-  // changes ask the user which side to keep; then re-attach the live CRDT.
+  // editor content, and the freshly synced shared text, then re-attach the CRDT.
   private async reconnectMerge(gen: number): Promise<void> {
     if (!this.offline || this.mergingReconnect) return;
     this.mergingReconnect = true;
@@ -192,23 +211,10 @@ export class CollabBinding {
       const path = this.path;
       if (!view || !doc || !path || this.gen !== gen || this.destroyed(view)) return;
       const text = doc.getText("content");
-      const base = this.baseAtDisconnect;
       const local = normalizeLineEndings(view.state.doc.toString());
       const remote = text.toString();
-
-      let merged = local;
-      if (remote !== local) {
-        const probe = mergeThreeWay(base, local, remote, "detect");
-        if (probe.conflicts.length === 0) {
-          merged = probe.text; // non-overlapping changes: combine automatically
-        } else if (this.onConflict) {
-          const action = await this.onConflict(path, probe);
-          if (this.gen !== gen || this.destroyed(view)) return;
-          merged = mergeThreeWay(base, local, remote, action === "theirs" ? "theirs" : "mine").text;
-        } else {
-          merged = mergeThreeWay(base, local, remote, "mine").text; // keep our version
-        }
-      }
+      const merged = await this.mergeShared(path, this.baseAtDisconnect, local, remote);
+      if (this.gen !== gen || this.destroyed(view)) return;
 
       if (this.user) registerAuthor(doc, this.user);
       applyMinimalYTextUpdate(doc, text, merged); // publish the merged result
@@ -218,6 +224,38 @@ export class CollabBinding {
       this.mergingReconnect = false;
       this.bindEditor();
     }
+  }
+
+  // Recover the common ancestor for an engage-time divergence from the change
+  // log, using the last-synced base hash. Empty string if it cannot be found
+  // (a full-file conflict, resolved losslessly, is better than an overwrite).
+  private async resolveBase(path: string, local: string, remote: string): Promise<string> {
+    const baseHash = this.getBaseHash?.(path);
+    if (baseHash === undefined) return "";
+    if (hashString(local) === baseHash) return local; // our copy is the ancestor
+    if (hashString(remote) === baseHash) return remote; // shared copy is the ancestor
+    if (!this.auth) return "";
+    const entries = await listChangelog(this.serverUrl, this.auth, path);
+    return reconstructBase(entries, baseHash) ?? "";
+  }
+
+  // Three-way line merge shared by engage-time and reconnect-time reconciliation.
+  // Clean merges combine both sides; overlapping (same-line) changes ask the user
+  // which side to keep and write it cleanly (never markers, never duplicates).
+  private async mergeShared(
+    path: string,
+    base: string,
+    local: string,
+    remote: string,
+  ): Promise<string> {
+    if (remote === local) return local;
+    const probe = mergeThreeWay(base, local, remote, "detect");
+    if (probe.conflicts.length === 0) return probe.text;
+    if (this.onConflict) {
+      const action = await this.onConflict(path, probe);
+      return mergeThreeWay(base, local, remote, action === "theirs" ? "theirs" : "mine").text;
+    }
+    return mergeThreeWay(base, local, remote, "mine").text;
   }
 
   async disengage(): Promise<void> {
