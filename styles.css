@@ -237,6 +237,13 @@
   font-weight: 500;
 }
 
+/* Rote Offline-Warnung */
+.notice.lp-notice-error {
+  background-color: var(--color-red, #e5484d);
+  color: #fff;
+  font-weight: 600;
+}
+
 /* Versionen-Block in der Seitenleiste */
 .lp-roster h4.lp-section-top {
   margin-top: 18px;

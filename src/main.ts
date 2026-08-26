@@ -29,6 +29,9 @@ export default class LivePresencePlugin extends Plugin {
   private coeditEngageTimer: number | null = null;
   private coeditDisengageTimer: number | null = null;
   private statusBarEl!: HTMLElement;
+  // Persistent red toast shown while the connection is down.
+  private offlineNotice: Notice | null = null;
+  private wasConnected = false;
   // CodeMirror view of the file that currently has focus; used for cursor reporting.
   private activeCm: EditorView | null = null;
   // Full name resolved from the profile database.
@@ -189,10 +192,19 @@ export default class LivePresencePlugin extends Plugin {
           }
         }, 500);
       }
-    } else if (this.binding.isActive(file) && this.coeditDisengageTimer === null) {
+    } else if (
+      this.binding.isActive(file) &&
+      !this.binding.isOffline() &&
+      this.coeditDisengageTimer === null
+    ) {
       this.coeditDisengageTimer = window.setTimeout(() => {
         this.coeditDisengageTimer = null;
         const p = this.binding.path;
+        // Keep the binding alive while WE are offline: presence looks empty only
+        // because we cannot see anyone. Tearing it down here would let both the
+        // vault sync and a fresh engage() touch the note on reconnect and append
+        // instead of replace. The reconnect line-merge owns re-entry instead.
+        if (this.binding.isOffline()) return;
         if (p && this.presence.getAll().filter((e) => e.state.file === p).length < 2) {
           void this.binding.disengage();
         }
@@ -282,6 +294,7 @@ export default class LivePresencePlugin extends Plugin {
       }, 1500);
     }
 
+    this.watchConnection();
     this.updateActiveContext();
     this.restartVaultSync();
   }
@@ -303,6 +316,30 @@ export default class LivePresencePlugin extends Plugin {
       () => {}, // logging silenced for normal operation
     );
     void this.vaultSync.start();
+  }
+
+  // Persistent red toast while the connection is down, cleared on reconnect.
+  private watchConnection(): void {
+    this.presence?.onStatus((status) => {
+      if (status === "connected") {
+        this.wasConnected = true;
+        if (this.offlineNotice) {
+          this.offlineNotice.hide();
+          this.offlineNotice = null;
+          const n = new Notice("Live Presence: Wieder online. Änderungen werden abgeglichen.");
+          n.noticeEl.addClass("lp-notice-success");
+        }
+      } else if (status === "disconnected" || status === "error") {
+        // Warn only after a working connection, once per offline episode.
+        if (this.wasConnected && !this.offlineNotice) {
+          this.offlineNotice = new Notice(
+            "Sie sind Offline, Änderungen werden nach dem Online-Zugang eingebunden, bitte auf Überschreibungen achten!",
+            0,
+          );
+          this.offlineNotice.noticeEl.addClass("lp-notice-error");
+        }
+      }
+    });
   }
 
   // Ask the user which side to keep for an overlapping (same-line) change.

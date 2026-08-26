@@ -55,6 +55,11 @@ export class CollabBinding {
   get active(): boolean {
     return this.provider !== null;
   }
+  // True while our own connection is down: the binding must be kept alive so the
+  // reconnect line-merge owns re-entry (and whole-vault sync stays away).
+  isOffline(): boolean {
+    return this.offline;
+  }
 
   async engage(
     view: EditorView,
