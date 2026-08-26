@@ -3,6 +3,7 @@ import { MarkdownView, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
 import { listChangelog } from "./changelog";
 import { CollabBinding } from "./collab/binding";
 import { ConflictModal } from "./conflict-modal";
+import type { MergeResult } from "./merge";
 import { type DayInfo, type TimedRun, reconstructHistory } from "./history-blame";
 import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
 import { NameModal } from "./name-modal";
@@ -183,6 +184,7 @@ export default class LivePresencePlugin extends Plugin {
               this.settings.serverUrl,
               this.effectiveAuth(),
               this.effectiveUser(),
+              (p, result) => this.resolveConflict(p, result),
             );
           }
         }, 500);
@@ -297,13 +299,17 @@ export default class LivePresencePlugin extends Plugin {
       () => this.effectiveUser(),
       () => this.loadBaseHashes(),
       (record) => this.saveBaseHashes(record),
-      (path, result) =>
-        new Promise<"mine" | "theirs">((resolve) =>
-          new ConflictModal(this.app, path, result, resolve).open(),
-        ),
+      (path, result) => this.resolveConflict(path, result),
       () => {}, // logging silenced for normal operation
     );
     void this.vaultSync.start();
+  }
+
+  // Ask the user which side to keep for an overlapping (same-line) change.
+  private resolveConflict(path: string, result: MergeResult): Promise<"mine" | "theirs"> {
+    return new Promise<"mine" | "theirs">((resolve) =>
+      new ConflictModal(this.app, path, result, resolve).open(),
+    );
   }
 
   private async resolveDisplayName(): Promise<string> {

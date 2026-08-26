@@ -4,6 +4,7 @@ import { Notice } from "obsidian";
 import { yCollab } from "y-codemirror.next";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
+import { type MergeResult, mergeThreeWay } from "../merge";
 import {
   applyMinimalCmUpdate,
   applyMinimalYTextUpdate,
@@ -22,6 +23,8 @@ interface User {
   color: string;
 }
 
+type ConflictResolver = (path: string, result: MergeResult) => Promise<"mine" | "theirs">;
+
 // Binds one file's editor to a shared Y.Text so edits are character-by-character
 // real-time with correct (relative-position) remote cursors. One file at a time.
 export class CollabBinding {
@@ -31,6 +34,16 @@ export class CollabBinding {
   private view: EditorView | null = null;
   path: string | null = null;
   private gen = 0;
+
+  private user: User | null = null;
+  private onConflict: ConflictResolver | null = null;
+  // Offline handling: while disconnected we detach the live CRDT so our edits
+  // stay a clean local version, then line-merge on reconnect instead of letting
+  // Yjs interleave two people's same-line edits into one mashed line.
+  private everSynced = false;
+  private offline = false;
+  private baseAtDisconnect = "";
+  private mergingReconnect = false;
 
   baseExtension(): Extension {
     return this.compartment.of([]);
@@ -49,6 +62,7 @@ export class CollabBinding {
     serverUrl: string,
     auth: Auth,
     user: User,
+    onConflict?: ConflictResolver,
   ): Promise<void> {
     await this.disengage();
     const gen = ++this.gen;
@@ -64,6 +78,10 @@ export class CollabBinding {
       this.provider = provider;
       this.view = view;
       this.path = path;
+      this.user = user;
+      this.onConflict = onConflict ?? null;
+      this.everSynced = false;
+      this.offline = false;
 
       const synced = await this.waitForSync(provider, 8000);
       if (this.gen !== gen || this.destroyed(view)) return;
@@ -72,6 +90,7 @@ export class CollabBinding {
         await this.disengage();
         return;
       }
+      this.everSynced = true;
 
       // Announce ourselves in the doc room first (used for the seed election and by yCollab).
       provider.awareness.setLocalStateField("user", {
@@ -109,14 +128,90 @@ export class CollabBinding {
       // If both are empty there is nothing to reconcile.
       if (this.gen !== gen || this.destroyed(view)) return;
 
-      const ext = yCollab(text, provider.awareness, { undoManager: false });
-      view.dispatch({
-        effects: this.compartment.reconfigure(Array.isArray(ext) ? [...ext] : [ext]),
+      this.bindEditor();
+
+      // Detach the live CRDT when the socket drops so our offline edits stay a
+      // clean local version; re-attach with a line merge when it comes back.
+      provider.on("status", (e: { status: string }) => {
+        if (this.provider !== provider) return;
+        if (e.status === "disconnected") this.goOffline();
+      });
+      provider.on("sync", (isSynced: boolean) => {
+        if (this.provider !== provider) return;
+        if (isSynced && this.offline) void this.reconnectMerge(gen);
       });
     } catch (err) {
       console.error("Live Presence: co-editing setup failed:", err);
       new Notice("Live Presence: Co-Editing-Fehler.");
       await this.disengage();
+    }
+  }
+
+  // Attach yCollab (editor <-> shared text, remote cursors).
+  private bindEditor(): void {
+    const view = this.view;
+    const provider = this.provider;
+    const doc = this.doc;
+    if (!view || !provider || !doc || this.destroyed(view)) return;
+    const ext = yCollab(doc.getText("content"), provider.awareness, { undoManager: false });
+    view.dispatch({
+      effects: this.compartment.reconfigure(Array.isArray(ext) ? [...ext] : [ext]),
+    });
+  }
+
+  // Socket dropped: remember the last shared state and detach the live CRDT so
+  // further edits are plain editor edits (not fed into the now-stale doc).
+  private goOffline(): void {
+    if (this.offline || !this.everSynced) return;
+    const view = this.view;
+    const doc = this.doc;
+    if (!view || !doc || this.destroyed(view)) return;
+    this.offline = true;
+    this.baseAtDisconnect = doc.getText("content").toString();
+    try {
+      view.dispatch({ effects: this.compartment.reconfigure([]) });
+    } catch {
+      // view may be gone
+    }
+  }
+
+  // Back online: three-way merge the common base (state at disconnect), our
+  // editor content, and the freshly synced shared text. Overlapping same-line
+  // changes ask the user which side to keep; then re-attach the live CRDT.
+  private async reconnectMerge(gen: number): Promise<void> {
+    if (!this.offline || this.mergingReconnect) return;
+    this.mergingReconnect = true;
+    try {
+      const view = this.view;
+      const doc = this.doc;
+      const path = this.path;
+      if (!view || !doc || !path || this.gen !== gen || this.destroyed(view)) return;
+      const text = doc.getText("content");
+      const base = this.baseAtDisconnect;
+      const local = normalizeLineEndings(view.state.doc.toString());
+      const remote = text.toString();
+
+      let merged = local;
+      if (remote !== local) {
+        const probe = mergeThreeWay(base, local, remote, "detect");
+        if (probe.conflicts.length === 0) {
+          merged = probe.text; // non-overlapping changes: combine automatically
+        } else if (this.onConflict) {
+          const action = await this.onConflict(path, probe);
+          if (this.gen !== gen || this.destroyed(view)) return;
+          merged = mergeThreeWay(base, local, remote, action === "theirs" ? "theirs" : "mine").text;
+        } else {
+          merged = mergeThreeWay(base, local, remote, "mine").text; // keep our version
+        }
+      }
+
+      if (this.user) registerAuthor(doc, this.user);
+      applyMinimalYTextUpdate(doc, text, merged); // publish the merged result
+      applyMinimalCmUpdate(view, merged); // and show it in the editor
+    } finally {
+      this.offline = false;
+      this.mergingReconnect = false;
+      this.bindEditor();
     }
   }
 
@@ -129,6 +224,10 @@ export class CollabBinding {
     this.provider = null;
     this.doc = null;
     this.path = null;
+    this.user = null;
+    this.onConflict = null;
+    this.offline = false;
+    this.everSynced = false;
 
     if (view && !this.destroyed(view)) {
       try {
