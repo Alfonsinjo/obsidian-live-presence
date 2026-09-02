@@ -3,6 +3,7 @@ import { MarkdownView, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
 import { listChangelog } from "./changelog";
 import { CollabBinding } from "./collab/binding";
 import { ConflictModal } from "./conflict-modal";
+import { editingLockExtension, setEditingOnline } from "./editing-lock";
 import type { MergeResult } from "./merge";
 import { type DayInfo, type TimedRun, reconstructHistory } from "./history-blame";
 import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
@@ -90,6 +91,7 @@ export default class LivePresencePlugin extends Plugin {
       cursorReporter,
       this.binding.baseExtension(),
       inlineOverlayExtension(),
+      editingLockExtension(),
     ]);
 
     this.addRibbonIcon("users", "Live Presence: Wer ist da?", () => this.activateRoster());
@@ -234,12 +236,15 @@ export default class LivePresencePlugin extends Plugin {
     // startup as well as on manual connect), and a clear notice when the server
     // cannot be reached. A short poll covers a status event we might have missed.
     {
+      // Locked until we are actually connected: a connection is always required.
+      setEditingOnline(false);
       new Notice("Live Presence: Versuche Verbindung zur Datenbank aufzubauen …");
       let settled = false;
       const succeed = () => {
         if (settled) return;
         settled = true;
         window.clearTimeout(timer);
+        setEditingOnline(true);
         const n = new Notice("Erfolgreich mit Live Presence verbunden");
         n.noticeEl.addClass("lp-notice-success");
       };
@@ -293,22 +298,25 @@ export default class LivePresencePlugin extends Plugin {
     void this.vaultSync.start();
   }
 
-  // Persistent red toast while the connection is down, cleared on reconnect.
+  // Editing requires a live connection. While offline we lock all note editing
+  // and show a persistent red banner; on reconnect we unlock and confirm.
   private watchConnection(): void {
     this.presence?.onStatus((status) => {
       if (status === "connected") {
         this.wasConnected = true;
+        setEditingOnline(true);
         if (this.offlineNotice) {
           this.offlineNotice.hide();
           this.offlineNotice = null;
-          const n = new Notice("Live Presence: Wieder online. Änderungen werden abgeglichen.");
+          const n = new Notice("Live Presence: Wieder verbunden. Bearbeitung ist wieder möglich.");
           n.noticeEl.addClass("lp-notice-success");
         }
       } else if (status === "disconnected" || status === "error") {
-        // Warn only after a working connection, once per offline episode.
-        if (this.wasConnected && !this.offlineNotice) {
+        setEditingOnline(false);
+        if (!this.offlineNotice) {
           this.offlineNotice = new Notice(
-            "Sie sind Offline, Änderungen werden nach dem Online-Zugang eingebunden, bitte auf Überschreibungen achten!",
+            "Sie sind offline. Der Fortschritt wird NICHT in der Cloud gespeichert und die Bearbeitung ist gesperrt. " +
+              "Bitte schreiben Sie solange in ein privates Textdokument und fügen Sie die Inhalte nach dem Wiederverbinden ein, um Probleme zu vermeiden.",
             0,
           );
           this.offlineNotice.noticeEl.addClass("lp-notice-error");
