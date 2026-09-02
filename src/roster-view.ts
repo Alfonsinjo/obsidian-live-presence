@@ -26,7 +26,6 @@ interface RosterCallbacks {
 export class RosterView extends ItemView {
   private presenceEl!: HTMLElement;
   private versionEl!: HTMLElement;
-  private days: { path: string | null; list: SidebarDay[] | null } | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -51,27 +50,15 @@ export class RosterView extends ItemView {
     this.versionEl = this.contentEl.createDiv();
     this.renderPresence();
     this.renderVersions();
-    void this.ensureDays(false);
   }
 
   // Presence updates only re-render the presence section.
   refresh(): void {
     this.renderPresence();
-    void this.ensureDays(false);
   }
 
   // Called when the version/overlay state changed deliberately (button click).
   refreshVersions(): void {
-    this.renderVersions();
-  }
-
-  private async ensureDays(force: boolean): Promise<void> {
-    const path = this.cb.getActivePath();
-    if (!force && this.days?.path === path) return;
-    this.days = { path, list: null }; // loading
-    this.renderVersions();
-    const list = path ? await this.cb.loadDays(path) : [];
-    this.days = { path, list };
     this.renderVersions();
   }
 
@@ -134,7 +121,7 @@ export class RosterView extends ItemView {
   private renderVersions(): void {
     const root = this.versionEl;
     root.empty();
-    root.createEl("h4", { text: "Verlauf (aktuelle Notiz)", cls: "lp-section-top" });
+    root.createEl("h4", { text: "Wer hat was geschrieben", cls: "lp-section-top" });
 
     const path = this.cb.getActivePath();
     if (!path) {
@@ -155,26 +142,11 @@ export class RosterView extends ItemView {
         this.cb.onClearOverlay(),
       );
     }
-
-    const days = this.days && this.days.path === path ? this.days.list : null;
-    if (days === null) {
-      root.createDiv({ cls: "lp-roster-empty", text: "Lade Verlauf …" });
-      return;
-    }
-    if (days.length === 0) {
-      root.createDiv({ cls: "lp-roster-empty", text: "Noch keine aufgezeichneten Änderungen." });
-      return;
-    }
-
-    root.createDiv({ cls: "lp-ver-hint", text: "Änderungen nach Tag (anklicken zum Hervorheben):" });
-    const list = root.createDiv({ cls: "lp-ver-list" });
-    for (let i = days.length - 1; i >= 0; i--) {
-      const d = days[i];
-      const item = list.createDiv({ cls: "lp-ver-item lp-ver-clickable" });
-      if (info.mode === "day" && info.day === d.day) item.addClass("lp-btn-active");
-      item.createDiv({ cls: "lp-ver-when", text: d.label });
-      item.createDiv({ cls: "lp-ver-by", text: d.authors.join(", ") });
-      item.onClickEvent(() => this.cb.onSelectDay(d.day));
-    }
+    root.createDiv({
+      cls: "lp-ver-hint",
+      text: "Farbige Markierung zeigt, wer welche Passage geschrieben hat (per Zeiger für Details).",
+    });
+    // The per-day version history is temporarily hidden and returns in a later
+    // update once it is reliable.
   }
 }
