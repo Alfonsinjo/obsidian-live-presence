@@ -2,10 +2,9 @@ import { EditorView } from "@codemirror/view";
 import { MarkdownView, Notice, Plugin, type WorkspaceLeaf, requestUrl } from "obsidian";
 import { listChangelog } from "./changelog";
 import { CollabBinding } from "./collab/binding";
-import { ConflictModal } from "./conflict-modal";
+import { ConflictInfoModal } from "./conflict-info-modal";
 import { editingLockExtension, setEditingOnline } from "./editing-lock";
 import { configureLogger, logProblem } from "./logger";
-import type { MergeResult } from "./merge";
 import { UpdateModal } from "./update-modal";
 import { type VersionInfo, fetchRequiredVersion, isOutdated } from "./version";
 import { type DayInfo, type TimedRun, reconstructHistory } from "./history-blame";
@@ -216,7 +215,7 @@ export default class LivePresencePlugin extends Plugin {
           this.settings.serverUrl,
           this.effectiveAuth(),
           this.effectiveUser(),
-          (p, result) => this.resolveConflict(p, result),
+          (p, localText) => this.notifyConflict(p, localText),
           (p) => this.vaultSync?.getBaseHash(p),
         );
       }
@@ -338,7 +337,7 @@ export default class LivePresencePlugin extends Plugin {
       () => this.effectiveUser(),
       () => this.loadBaseHashes(),
       (record) => this.saveBaseHashes(record),
-      (path, result) => this.resolveConflict(path, result),
+      (path, localText) => this.notifyConflict(path, localText),
       () => {}, // logging silenced for normal operation
       (path) => this.onNoteMaterialized(path),
     );
@@ -444,18 +443,36 @@ export default class LivePresencePlugin extends Plugin {
     }
   }
 
-  // Connectivity check. The WebSocket's own connected flag is the authority: if
-  // the live link to the server is up, we are online. We deliberately do NOT
-  // gate on navigator.onLine here - inside Obsidian it can be stuck false and
-  // would then keep showing offline while actually connected. (The window
-  // "offline" event is still used elsewhere as an instant lock hint.)
-  private heartbeat(): void {
+  // Connectivity check. Neither the WebSocket's connected flag (it lags on a
+  // drop - stays true until TCP notices, so editing would wrongly unlock) nor
+  // navigator.onLine (can be stuck false inside Obsidian) is reliable on its
+  // own. So we actively probe the server via requestUrl (which, unlike fetch,
+  // works inside Obsidian) with a short timeout. Online = server reachable AND
+  // the WebSocket is up.
+  private async heartbeat(): Promise<void> {
     if (!this.settings.serverUrl || !this.settings.authUser) return;
+    const reachable = await this.probeReachable();
     const wsUp = this.presence?.isConnected() ?? false;
-    if (!wsUp && !this.versionBlocked) {
-      logProblem("warn", "heartbeat offline", { wsUp, onLine: navigator.onLine });
+    const online = reachable && wsUp;
+    if (!online && !this.versionBlocked) {
+      logProblem("warn", "heartbeat offline", { reachable, wsUp, onLine: navigator.onLine });
     }
-    this.setOffline(!wsUp);
+    this.setOffline(!online);
+  }
+
+  // Actively check the server is reachable right now, with a short timeout so a
+  // dead connection is detected quickly instead of hanging.
+  private async probeReachable(): Promise<boolean> {
+    const url = `${this.settings.serverUrl.replace(/^wss:/i, "https:").replace(/^ws:/i, "http:")}/version`;
+    try {
+      const res = await Promise.race([
+        requestUrl({ url, method: "GET", throw: false }),
+        new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error("timeout")), 3000)),
+      ]);
+      return (res as { status: number }).status === 200;
+    } catch {
+      return false;
+    }
   }
 
   // Central driver for the offline state: locks editing and shows/hides the
@@ -496,10 +513,11 @@ export default class LivePresencePlugin extends Plugin {
     if (this.app.workspace.getActiveFile()?.path === path) this.evaluateCoedit();
   }
 
-  // Ask the user which side to keep for an overlapping (same-line) change.
-  private resolveConflict(path: string, result: MergeResult): Promise<"mine" | "theirs"> {
-    return new Promise<"mine" | "theirs">((resolve) =>
-      new ConflictModal(this.app, path, result, resolve).open(),
+  // Inform the user that their local copy diverged from the server. The server
+  // version always wins; this lets them copy their own text first.
+  private notifyConflict(path: string, localText: string): Promise<void> {
+    return new Promise<void>((resolve) =>
+      new ConflictInfoModal(this.app, path, localText, resolve).open(),
     );
   }
 

@@ -117,7 +117,7 @@ export class VaultSync {
     private getUser: () => { name: string; color: string },
     private loadBaseHashes: () => Promise<Record<string, string>>,
     private saveBaseHashes: (record: Record<string, string>) => void,
-    private onConflict: (path: string, result: MergeResult) => Promise<"mine" | "theirs">,
+    private onConflict: (path: string, localText: string) => Promise<void>,
     private log: (...args: unknown[]) => void,
     // Notified after a stub note has been downloaded, so co-editing can engage.
     private onMaterialized: (path: string) => void = () => {},
@@ -425,53 +425,25 @@ export class VaultSync {
     }
   }
 
-  // Three-way merge for a note that diverged on both sides. Clean merges apply
-  // automatically; overlapping conflicts are resolved by the user. Nothing is
-  // ever discarded silently: the worst case keeps both versions with markers.
+  // A note diverged from the server copy. The server version always wins: we
+  // notify the user (so they can copy their own text first), then mirror the
+  // server version onto their disk. We never push the local text, which would
+  // clobber the server, and we never merge.
   private async mergeAndResolve(
     path: string,
-    baseHash: string | undefined,
+    _baseHash: string | undefined,
     local: string,
     remote: string,
   ): Promise<void> {
     if (this.conflictsInProgress.has(path)) return;
     this.conflictsInProgress.add(path);
     try {
-      // Recover the common ancestor. Only trust the cached base text if it
-      // still matches the recorded base hash; otherwise reconstruct it from the
-      // change log so a stale cache can never turn a merge into an overwrite.
-      let base = "";
-      const cached = this.baseText.get(path);
-      if (cached !== undefined && (baseHash === undefined || hashString(cached) === baseHash)) {
-        base = cached;
-      } else if (baseHash !== undefined) {
-        const entries: ChangeEntry[] = await listChangelog(this.serverUrl, this.auth, path);
-        base = reconstructBase(entries, baseHash) ?? "";
-      }
-
-      // Probe pass: find the overlapping regions without writing markers.
-      const probe = mergeThreeWay(base, local, remote, "detect");
-      if (probe.conflicts.length === 0) {
-        // No overlap: combine both sides automatically.
-        this.log(`auto-merged ${path}`);
-        await this.applyMerged(path, probe.text);
-        return;
-      }
-      // Overlap: let the user pick a winning side, then write it cleanly.
-      const action = await this.onConflict(path, probe);
-      const resolved = mergeThreeWay(base, local, remote, action === "theirs" ? "theirs" : "mine");
-      this.log(`resolved conflict in ${path} -> ${action}`);
-      await this.applyMerged(path, resolved.text);
+      await this.onConflict(path, local);
+      await this.writeText(path, remote); // mirror the server version to disk
+      this.log(`conflict on ${path}: took server version`);
     } finally {
       this.conflictsInProgress.delete(path);
     }
-  }
-
-  private async applyMerged(path: string, text: string): Promise<void> {
-    await this.writeText(path, text); // materialise the merged result on disk
-    // Raw push: the merged text already contains the remote changes, so it must
-    // not be re-diffed against the shared copy (that would loop).
-    await this.pushTextRaw(path, hashString(text), text);
   }
 
   private onLocalChange(path: string): void {

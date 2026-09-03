@@ -132,6 +132,13 @@
   gap: 8px;
   margin-top: 12px;
 }
+.lp-conflict-text {
+  width: 100%;
+  font-family: var(--font-monospace, monospace);
+  font-size: 0.8em;
+  resize: vertical;
+  margin: 8px 0;
+}
 .lp-conflict-hint {
   font-size: 0.78em;
   color: var(--text-muted);
