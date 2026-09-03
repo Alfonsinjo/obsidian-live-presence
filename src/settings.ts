@@ -1,4 +1,6 @@
-import { type App, PluginSettingTab, Setting } from "obsidian";
+import { type App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { ConnectModal } from "./connect-modal";
+import { testConnection } from "./connection";
 import type LivePresencePlugin from "./main";
 import { colorFromName } from "./utils";
 
@@ -124,13 +126,36 @@ export class LivePresenceSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Anmelden")
-      .setDesc("Mit den obigen Daten verbinden und die Verbindung testen. Das Ergebnis erscheint als Hinweis.")
+      .setDesc(
+        "Prüft die obigen Daten und meldet genau, was nicht stimmt (Server-URL, Benutzername oder Passwort). " +
+          "Bei aktiver Vault-Synchronisation folgt vor dem Abgleich eine Sicherheitsabfrage.",
+      )
       .addButton((b) =>
         b
           .setButtonText("Anmelden / Verbindung testen")
           .setCta()
-          .onClick(() => {
-            this.plugin.reconnect();
+          .onClick(async () => {
+            b.setDisabled(true);
+            b.setButtonText("Prüfe …");
+            const res = await testConnection(
+              this.plugin.settings.serverUrl,
+              this.plugin.settings.authUser,
+              this.plugin.settings.authPass,
+            );
+            b.setDisabled(false);
+            b.setButtonText("Anmelden / Verbindung testen");
+            if (!res.ok) {
+              const n = new Notice(`Live Presence: ${res.reason}`, 8000);
+              n.noticeEl.addClass("lp-notice-error");
+              return;
+            }
+            const n = new Notice("Live Presence: Zugangsdaten korrekt.");
+            n.noticeEl.addClass("lp-notice-success");
+            if (this.plugin.settings.enableVaultSync) {
+              new ConnectModal(this.app, () => this.plugin.reconnect()).open();
+            } else {
+              this.plugin.reconnect();
+            }
           }),
       );
   }
