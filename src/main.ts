@@ -549,14 +549,12 @@ export default class LivePresencePlugin extends Plugin {
     const files = ["manifest.json", "main.js", "styles.css"];
     const notice = new Notice("Live Presence: Lade Update …", 0);
     try {
-      // Download everything first; only write once all files are in hand.
+      // Download everything first; only write once all files are in hand. Each
+      // file is retried a few times: the connection can briefly drop, and a
+      // single failed fetch must not abort the whole update.
       const contents: Record<string, string> = {};
       for (const f of files) {
-        const res = await requestUrl({ url: `${base}/${f}`, method: "GET", throw: false });
-        if (res.status !== 200 || typeof res.text !== "string" || res.text.length === 0) {
-          throw new Error(`${f}: HTTP ${res.status}`);
-        }
-        contents[f] = res.text;
+        contents[f] = await this.fetchUpdateFile(`${base}/${f}`, f);
       }
       for (const f of files) {
         await this.app.vault.adapter.write(`${dir}/${f}`, contents[f]);
@@ -566,9 +564,39 @@ export default class LivePresencePlugin extends Plugin {
       window.setTimeout(() => window.location.reload(), 900);
     } catch (err) {
       logProblem("error", "Self-Update fehlgeschlagen", { version, err: String(err) });
-      notice.setMessage("Live Presence: Update fehlgeschlagen. Bitte über BRAT aktualisieren.");
-      window.setTimeout(() => notice.hide(), 6000);
+      notice.setMessage(`Live Presence: Update fehlgeschlagen (${String(err)}). Bitte erneut versuchen oder über BRAT aktualisieren.`);
+      window.setTimeout(() => notice.hide(), 10000);
     }
+  }
+
+  // Fetch one release file, retrying on a failed or empty response. Falls back
+  // to the array-buffer body when the text body comes back empty (can happen on
+  // some redirected responses).
+  private async fetchUpdateFile(url: string, name: string): Promise<string> {
+    let lastErr = "";
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        // Race against a timeout: requestUrl has no timeout of its own and can
+        // hang indefinitely if the connection stalls mid-download.
+        const res = await Promise.race([
+          requestUrl({ url, method: "GET", throw: false }),
+          new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Zeitüberschreitung")), 12000)),
+        ]);
+        if (res.status !== 200) {
+          lastErr = `${name}: HTTP ${res.status}`;
+        } else if (typeof res.text === "string" && res.text.length > 0) {
+          return res.text;
+        } else if (res.arrayBuffer && res.arrayBuffer.byteLength > 0) {
+          return new TextDecoder().decode(res.arrayBuffer);
+        } else {
+          lastErr = `${name}: leere Antwort`;
+        }
+      } catch (e) {
+        lastErr = `${name}: ${String(e)}`;
+      }
+      if (attempt < 4) await new Promise((r) => setTimeout(r, 600 * attempt));
+    }
+    throw new Error(lastErr || `${name}: fehlgeschlagen`);
   }
 
   // Connectivity check. Neither the WebSocket's connected flag (it lags on a
