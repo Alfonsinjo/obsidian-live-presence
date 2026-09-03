@@ -8,6 +8,7 @@ import { logProblem } from "../logger";
 import {
   applyMinimalCmUpdate,
   applyMinimalYTextUpdate,
+  hashString,
   normalizeLineEndings,
   registerAuthor,
   sleep,
@@ -23,7 +24,7 @@ interface User {
   color: string;
 }
 
-type ConflictResolver = (path: string, localText: string) => Promise<void>;
+type ConflictResolver = (path: string, localText: string, remoteText: string) => Promise<void>;
 type BaseHashLookup = (path: string) => string | undefined;
 
 // Binds one file's editor to a shared Y.Text so edits are character-by-character
@@ -129,12 +130,19 @@ export class CollabBinding {
         // Editor empty, shared has content -> adopt it.
         applyMinimalCmUpdate(view, remote0);
       } else {
-        // Both sides have content and differ. The server copy always wins:
-        // notify the user (so they can copy their own text), then adopt the
-        // shared version into the editor. No merge.
-        if (this.onConflict) await this.onConflict(path, local);
-        if (this.gen !== gen || this.destroyed(view)) return;
-        applyMinimalCmUpdate(view, remote0);
+        // Disk differs from the live server copy. For an open note the server
+        // always wins silently: offline editing is locked, so an open note has
+        // no genuine local divergence to preserve, and a live difference is just
+        // the server being ahead. The exception is when the server copy is
+        // unchanged since our last sync and ours is strictly ahead - then we
+        // publish ours. No conflict prompt here; real divergences on CLOSED
+        // notes are handled by whole-vault sync (which keeps an accurate base).
+        const baseHash = this.getBaseHash?.(path);
+        if (baseHash !== undefined && hashString(remote0) === baseHash && hashString(local) !== baseHash) {
+          applyMinimalYTextUpdate(doc, text, local); // we are ahead -> publish ours
+        } else {
+          applyMinimalCmUpdate(view, remote0); // adopt the server version
+        }
       }
       if (this.gen !== gen || this.destroyed(view)) return;
 

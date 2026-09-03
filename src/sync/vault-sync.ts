@@ -117,7 +117,7 @@ export class VaultSync {
     private getUser: () => { name: string; color: string },
     private loadBaseHashes: () => Promise<Record<string, string>>,
     private saveBaseHashes: (record: Record<string, string>) => void,
-    private onConflict: (path: string, localText: string) => Promise<void>,
+    private onConflict: (path: string, localText: string, remoteText: string) => Promise<void>,
     private log: (...args: unknown[]) => void,
     // Notified after a stub note has been downloaded, so co-editing can engage.
     private onMaterialized: (path: string) => void = () => {},
@@ -438,7 +438,7 @@ export class VaultSync {
     if (this.conflictsInProgress.has(path)) return;
     this.conflictsInProgress.add(path);
     try {
-      await this.onConflict(path, local);
+      await this.onConflict(path, local, remote);
       await this.writeText(path, remote); // mirror the server version to disk
       this.log(`conflict on ${path}: took server version`);
     } finally {

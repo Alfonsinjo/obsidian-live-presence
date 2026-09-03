@@ -215,7 +215,7 @@ export default class LivePresencePlugin extends Plugin {
           this.settings.serverUrl,
           this.effectiveAuth(),
           this.effectiveUser(),
-          (p, localText) => this.notifyConflict(p, localText),
+          (p, localText, remoteText) => this.notifyConflict(p, localText, remoteText),
           (p) => this.vaultSync?.getBaseHash(p),
         );
       }
@@ -337,7 +337,7 @@ export default class LivePresencePlugin extends Plugin {
       () => this.effectiveUser(),
       () => this.loadBaseHashes(),
       (record) => this.saveBaseHashes(record),
-      (path, localText) => this.notifyConflict(path, localText),
+      (path, localText, remoteText) => this.notifyConflict(path, localText, remoteText),
       () => {}, // logging silenced for normal operation
       (path) => this.onNoteMaterialized(path),
     );
@@ -514,10 +514,10 @@ export default class LivePresencePlugin extends Plugin {
   }
 
   // Inform the user that their local copy diverged from the server. The server
-  // version always wins; this lets them copy their own text first.
-  private notifyConflict(path: string, localText: string): Promise<void> {
+  // version always wins; this shows what differs and lets them copy their text.
+  private notifyConflict(path: string, localText: string, remoteText: string): Promise<void> {
     return new Promise<void>((resolve) =>
-      new ConflictInfoModal(this.app, path, localText, resolve).open(),
+      new ConflictInfoModal(this.app, path, localText, remoteText, resolve).open(),
     );
   }
 
