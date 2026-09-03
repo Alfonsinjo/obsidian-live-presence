@@ -6,6 +6,8 @@ import { ConflictModal } from "./conflict-modal";
 import { editingLockExtension, setEditingOnline } from "./editing-lock";
 import { configureLogger, logProblem } from "./logger";
 import type { MergeResult } from "./merge";
+import { UpdateModal } from "./update-modal";
+import { type VersionInfo, fetchRequiredVersion, isOutdated } from "./version";
 import { type DayInfo, type TimedRun, reconstructHistory } from "./history-blame";
 import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
 import { NameModal } from "./name-modal";
@@ -34,6 +36,10 @@ export default class LivePresencePlugin extends Plugin {
   private offlineBanner: HTMLElement | null = null;
   private offlineShowTimer: number | null = null;
   private offlineBannerVisible = false;
+  // Set when the client is older than the server-required version: the tool is
+  // locked and an update modal is shown until the user updates.
+  private versionBlocked = false;
+  private updateModalOpen = false;
   // CodeMirror view of the file that currently has focus; used for cursor reporting.
   private activeCm: EditorView | null = null;
   // Full name resolved from the profile database.
@@ -140,6 +146,8 @@ export default class LivePresencePlugin extends Plugin {
     this.registerDomEvent(window, "offline", () => this.setOffline(true));
     this.registerDomEvent(window, "online", () => void this.heartbeat());
     this.registerInterval(window.setInterval(() => void this.heartbeat(), 5000));
+    // Pick up a newly required version even while Obsidian keeps running.
+    this.registerInterval(window.setInterval(() => void this.enforceVersion(), 60000));
   }
 
   onunload(): void {
@@ -254,8 +262,13 @@ export default class LivePresencePlugin extends Plugin {
     // Report the connection outcome: a green success notice when connected (on
     // startup as well as on manual connect), and a clear notice when the server
     // cannot be reached. A short poll covers a status event we might have missed.
+    configureLogger(this.settings.serverUrl, this.settings.authUser, this.manifest.version);
+    // Version gate: an outdated client is blocked (and does not connect or sync)
+    // until it updates, so everyone runs the same version.
+    await this.enforceVersion();
+    if (this.versionBlocked) return;
+
     {
-      configureLogger(this.settings.serverUrl, this.settings.authUser, this.manifest.version);
       // Locked until we are actually connected: a connection is always required.
       this.setOffline(true);
       new Notice("Live Presence: Versuche Verbindung zur Datenbank aufzubauen …");
@@ -353,6 +366,42 @@ export default class LivePresencePlugin extends Plugin {
     return this.offlineBanner;
   }
 
+  // Enforce that the client is at least the server-required version. An outdated
+  // client is locked (no presence, sync or editing) and shown an update modal
+  // until it updates. Never blocks when the version cannot be determined.
+  private async enforceVersion(): Promise<void> {
+    const info = await fetchRequiredVersion(this.settings.serverUrl);
+    if (!info) return;
+    if (!isOutdated(this.manifest.version, info.min)) return;
+    if (!this.versionBlocked) {
+      this.versionBlocked = true;
+      logProblem("warn", "Version veraltet - blockiert", {
+        current: this.manifest.version,
+        min: info.min,
+      });
+      setEditingOnline(false);
+      this.vaultSync?.stop();
+      this.vaultSync = null;
+      void this.binding.disengage();
+      this.presence?.destroy();
+    }
+    this.showUpdateModal(info);
+  }
+
+  private showUpdateModal(info: VersionInfo): void {
+    if (this.updateModalOpen) return;
+    this.updateModalOpen = true;
+    new UpdateModal(
+      this.app,
+      this.manifest.version,
+      info.latest,
+      () => void this.enforceVersion(),
+      () => {
+        this.updateModalOpen = false;
+      },
+    ).open();
+  }
+
   // Fast connectivity check: the network flag is instant, and a short reachability
   // probe catches a dead server well before the WebSocket notices. We only count
   // as online when the network is up, the server answers, and the socket is up.
@@ -386,7 +435,10 @@ export default class LivePresencePlugin extends Plugin {
   private setOffline(offline: boolean): void {
     const configured = !!this.settings.serverUrl && !!this.settings.authUser;
     if (!configured) offline = false;
-    setEditingOnline(!offline);
+    // A version block keeps editing locked regardless; its modal replaces the
+    // offline banner, so do not also drive the banner here.
+    setEditingOnline(!offline && !this.versionBlocked);
+    if (this.versionBlocked) return;
     const banner = this.ensureOfflineBanner();
     if (offline) {
       if (this.offlineBannerVisible || this.offlineShowTimer !== null) return;
