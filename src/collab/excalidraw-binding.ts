@@ -94,7 +94,6 @@ interface ExcalAwareness {
   pointer: { x: number; y: number } | null;
   selected: string[];
   down: boolean;
-  ts: number;
 }
 
 // Injectable connection, so tests can wire two peers together without a server.
@@ -122,10 +121,6 @@ const PUBLISH_INTERVAL_MS = 50;
 // single move resets touch gestures and breaks text input on tablets.
 const POINTER_INTERVAL_MS = 50;
 const COLLAB_RENDER_INTERVAL_MS = 50;
-// A peer that has not reported in this long is dropped from the collaborator list.
-// Awareness states also linger after a hard disconnect, so they are swept.
-const PEER_TIMEOUT_MS = 20000;
-const PEER_SWEEP_INTERVAL_MS = 2000;
 const SYNC_TIMEOUT_MS = 8000;
 // Expired tombstones are cleared out occasionally, not on every tick.
 const TOMBSTONE_SWEEP_INTERVAL_MS = 300000;
@@ -148,7 +143,7 @@ export class ExcalidrawBinding {
   private unsubscribeScene: (() => void) | null = null;
   private publishTimer: ReturnType<typeof setInterval> | null = null;
   private pointerTimer: ReturnType<typeof setInterval> | null = null;
-  private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  private collabRenderTimer: ReturnType<typeof setTimeout> | null = null;
   private awarenessHandler: (() => void) | null = null;
   private observer: ((event: Y.YMapEvent<ExcalElement>, tr: Y.Transaction) => void) | null = null;
 
@@ -168,7 +163,9 @@ export class ExcalidrawBinding {
   // Last pointer/selection we broadcast, to avoid pointless awareness churn.
   private lastPointerKey = "";
   private lastCollabRender = 0;
-  private collabRenderPending = false;
+  // Signature of the collaborator set we last handed to the drawing, so an
+  // unchanged set is not pushed again.
+  private lastCollabKey = "";
   private lastTombstoneSweep = 0;
 
   constructor(
@@ -180,23 +177,6 @@ export class ExcalidrawBinding {
     return this.conn !== null && this.path === path;
   }
 
-  // Peers currently in this drawing's room, excluding ourselves. The caller uses
-  // this to decide who refreshes the file's at-rest copy: that copy is plain file
-  // text, and two clients writing different serialisations of the same scene at
-  // the same time would be merged as text - which for a compressed data block
-  // produces a broken file. Letting only the last participant out write it makes
-  // that impossible. Being briefly out of date is harmless by comparison: the
-  // room holds the real scene, and the next person to close the drawing publishes.
-  peerCount(): number {
-    const conn = this.conn;
-    if (!conn) return 0;
-    let n = 0;
-    conn.awareness.getStates().forEach((raw, clientId) => {
-      if (clientId === conn.awareness.clientID) return;
-      if (raw) n++;
-    });
-    return n;
-  }
   get active(): boolean {
     return this.conn !== null;
   }
@@ -255,10 +235,8 @@ export class ExcalidrawBinding {
     conn.awareness.on("change", this.awarenessHandler);
     this.broadcastPointer(true);
     this.pointerTimer = setInterval(() => this.broadcastPointer(false), POINTER_INTERVAL_MS);
-    // Awareness states survive a hard disconnect for a while, so stale cursors
-    // have to be swept rather than waited out.
-    this.sweepTimer = setInterval(() => this.renderCollaborators(), PEER_SWEEP_INTERVAL_MS);
-    this.renderCollaborators();
+    // No sweep timer: y-protocols removes the state of a client that stops
+    // reporting and emits a change for it, which is what drives the render.
 
     return true;
   }
@@ -279,14 +257,16 @@ export class ExcalidrawBinding {
     this.applying = false;
     this.publishedFingerprint = "";
     this.lastPointerKey = "";
-    this.collabRenderPending = false;
+    this.lastCollabKey = "";
 
-    for (const timer of [this.publishTimer, this.pointerTimer, this.sweepTimer]) {
-      if (timer !== null) clearInterval(timer);
-    }
+    if (this.publishTimer !== null) clearInterval(this.publishTimer);
+    if (this.pointerTimer !== null) clearInterval(this.pointerTimer);
+    // Also the throttling timer: left running, it would fire against the next
+    // drawing's connection after a quick switch between two drawings.
+    if (this.collabRenderTimer !== null) clearTimeout(this.collabRenderTimer);
     this.publishTimer = null;
     this.pointerTimer = null;
-    this.sweepTimer = null;
+    this.collabRenderTimer = null;
 
     if (this.unsubscribeScene) {
       try {
@@ -397,7 +377,13 @@ export class ExcalidrawBinding {
     if (outgoing.length === 0) return;
 
     conn.doc.transact(() => {
-      for (const el of outgoing) shared.set(el.id, el);
+      // Copies, and this is not optional. Y.Map stores a plain object by
+      // reference and hands the same reference back, while Excalidraw mutates
+      // its scene elements in place. Storing the live object would make the
+      // shared value change silently underneath us: Yjs would broadcast
+      // nothing, and every later comparison would find local and shared equal.
+      // The visible effect is shapes that appear and vanish but never move.
+      for (const el of outgoing) shared.set(el.id, { ...el });
     }, LOCAL_ORIGIN);
   }
 
@@ -444,7 +430,7 @@ export class ExcalidrawBinding {
     if (!force && key === this.lastPointerKey) return;
     this.lastPointerKey = key;
 
-    const state: ExcalAwareness = { user, pointer, selected, down, ts: Date.now() };
+    const state: ExcalAwareness = { user, pointer, selected, down };
     conn.awareness.setLocalState(state as unknown as Record<string, unknown>);
   }
 
@@ -452,15 +438,14 @@ export class ExcalidrawBinding {
   // report their pointers many times a second and re-rendering on each report
   // would both waste work and interfere with touch gestures.
   private scheduleCollaboratorRender(): void {
-    if (this.collabRenderPending) return;
+    if (this.collabRenderTimer !== null) return;
     const since = Date.now() - this.lastCollabRender;
     if (since >= COLLAB_RENDER_INTERVAL_MS) {
       this.renderCollaborators();
       return;
     }
-    this.collabRenderPending = true;
-    setTimeout(() => {
-      this.collabRenderPending = false;
+    this.collabRenderTimer = setTimeout(() => {
+      this.collabRenderTimer = null;
       this.renderCollaborators();
     }, COLLAB_RENDER_INTERVAL_MS - since);
   }
@@ -471,17 +456,35 @@ export class ExcalidrawBinding {
     if (!host || !conn) return;
     this.lastCollabRender = Date.now();
 
-    const now = Date.now();
     const map = new Map<string, Collaborator>();
     conn.awareness.getStates().forEach((raw, clientId) => {
+      // Our own state is in here too, and it changes every time we move the
+      // mouse - which is why the result is compared before being applied.
       if (clientId === conn.awareness.clientID) return;
       const s = raw as ExcalAwareness | null;
       if (!s || !s.user) return;
-      if (s.ts && now - s.ts > PEER_TIMEOUT_MS) return;
       map.set(String(clientId), toCollaborator(String(clientId), s));
     });
+
+    // Applying collaborators goes through updateScene, and doing that when
+    // nothing about the peers changed is the re-render that interferes with
+    // touch gestures and text entry.
+    const key = collaboratorKey(map);
+    if (key === this.lastCollabKey) return;
+    this.lastCollabKey = key;
     host.setCollaborators(map);
   }
+}
+
+// Compact signature of a collaborator set: identity, pointer, press state and
+// selection - everything the drawing actually renders.
+function collaboratorKey(map: Map<string, Collaborator>): string {
+  const parts: string[] = [];
+  for (const [id, c] of [...map.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    const p = c.pointer ? `${Math.round(c.pointer.x)},${Math.round(c.pointer.y)}` : "-";
+    parts.push(`${id}:${c.username}:${p}:${c.button}:${Object.keys(c.selectedElementIds).join("+")}`);
+  }
+  return parts.join("|");
 }
 
 export function toCollaborator(socketId: string, s: ExcalAwareness): Collaborator {

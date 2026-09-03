@@ -234,32 +234,52 @@ export class VaultSync {
 
   private drawingState(path: string): DrawingState {
     const entry = this.files?.get(path);
+    const file = this.app.vault.getAbstractFileByPath(path);
     return {
-      existsLocally: this.app.vault.getAbstractFileByPath(path) instanceof TFile,
+      // A placeholder counts as absent, so it is replaced by the real drawing.
+      existsLocally: file instanceof TFile && !this.stubs.has(path),
       inIndex: entry != null,
       tombstone: entry?.d === 1,
-      engaged: this.isCoEditing(path),
     };
   }
 
-  // Publish a drawing's file as-is, so peers who do not have it open (and new
-  // devices) still receive it. Never merged: the scene was already reconciled
-  // element by element, and a line merge of a compressed data block is fatal.
+  // Publish a drawing's file, so peers who do not have it open (and new devices)
+  // still receive it. Stored content-addressed in the blob store rather than as
+  // shared text: the body is one machine-generated, usually compressed block, and
+  // merging two serialisations of it as text yields a file that no longer opens.
+  // Content addressing makes two concurrent publishes harmless - two immutable
+  // blobs, one index entry wins.
   async publishDrawingAtRest(path: string): Promise<void> {
     if (!this.running || !this.files) return;
     if (onDrawingDisengage(this.drawingState(path)) !== "publish") return;
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return;
-    const content = normalizeLineEndings(await this.app.vault.read(file));
-    if (content.length === 0) return;
-    const hash = hashString(content);
+    const hash = await this.localHash(file);
     if (this.localHashes.get(path) === hash) return;
-    await this.pushTextRaw(path, hash, content);
-    this.mtimes.set(path, file.stat.mtime);
-    this.log(`published drawing at rest ${path}`);
+    if (await this.pushBlob(path, hash)) {
+      this.mtimes.set(path, file.stat.mtime);
+      this.log(`published drawing at rest ${path}`);
+    } else {
+      this.log(`publishing drawing failed, will retry: ${path}`);
+    }
+  }
+
+  // Fetch a drawing we have no usable copy of. Replaces a placeholder too.
+  private async fetchDrawing(path: string, entry: IndexEntry): Promise<void> {
+    if (entry.k !== "b") {
+      // Written by a client from before drawings became blobs.
+      await this.pullText(path);
+      this.stubs.delete(path);
+      return;
+    }
+    await this.pullBinary(path, entry.h);
+    this.stubs.delete(path);
   }
 
   private kindOf(path: string): "t" | "b" {
+    // A drawing is a .md file, but its body is a machine-managed data block; it
+    // is carried as an opaque blob so no text merge is ever applied to it.
+    if (this.isLiveDrawing(path)) return "b";
     return path.toLowerCase().endsWith(".md") ? "t" : "b";
   }
 
@@ -417,6 +437,12 @@ export class VaultSync {
         const entry = this.files.get(path);
         if (!entry || entry.d) continue;
         if (localPaths.has(path)) continue;
+        // A drawing is fetched outright: a placeholder that cannot be opened as
+        // a drawing would be worse than useless.
+        if (this.isLiveDrawing(path)) {
+          await this.fetchDrawing(path, entry);
+          continue;
+        }
         // On-demand: notes get a placeholder and are downloaded when opened.
         // Binaries have no placeholder; they are fetched with the note that
         // embeds them.
@@ -435,16 +461,17 @@ export class VaultSync {
     if (this.stubs.has(path)) return;
     // A live co-editing session owns this file's document; leave it alone.
     if (this.isCoEditing(path)) return;
+    const base = this.localHashes.get(path);
+    const entry = this.files.get(path);
+
     if (this.isLiveDrawing(path)) {
       // Two clients holding the same scene still serialise it to different bytes,
       // so the usual hash comparison would have them overwrite each other for ever.
-      if (onDrawingReconcile(this.drawingState(path)) === "publish") {
-        await this.publishDrawingAtRest(path);
-      }
+      const action = onDrawingReconcile(this.drawingState(path));
+      if (action === "publish") await this.publishDrawingAtRest(path);
+      else if (action === "fetch" && entry) await this.fetchDrawing(path, entry);
       return;
     }
-    const base = this.localHashes.get(path);
-    const entry = this.files.get(path);
 
     // Only re-hash when the file actually changed on disk.
     let current = base;
@@ -789,7 +816,7 @@ export class VaultSync {
         // The scene itself arrives through the drawing room; a differing byte
         // hash here says nothing, so an existing local copy is left alone.
         if (onDrawingIndexChange(this.drawingState(path)) === "fetch") {
-          void this.createStub(path);
+          void this.fetchDrawing(path, entry);
         }
         continue;
       }

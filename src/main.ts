@@ -158,9 +158,11 @@ export default class LivePresencePlugin extends Plugin {
           void this.binding.disengage().then(() => this.evaluateCoedit());
         }
         // A drawing room is keyed by path, so a rename ends the old session and
-        // starts one for the new path.
+        // starts one for the new path. Going through endDrawingSession keeps the
+        // last strokes: a plain disengage would drop whatever was still inside
+        // the publish interval.
         if (this.excalBinding.path === oldPath) {
-          void this.excalBinding.disengage().then(() => this.evaluateDrawingCoedit());
+          void this.endDrawingSession().then(() => this.evaluateDrawingCoedit());
         }
       }),
     );
@@ -313,11 +315,11 @@ export default class LivePresencePlugin extends Plugin {
       this.drawingEngageTimer = null;
     }
     this.excalBinding.flush();
-    // Only the last participant out refreshes the file's at-rest copy - see
-    // ExcalidrawBinding.peerCount for why concurrent writers are not acceptable.
-    const alone = this.excalBinding.peerCount() === 0;
     await this.excalBinding.disengage();
-    if (path && alone) await this.vaultSync?.publishDrawingAtRest(path);
+    // Every leaving client refreshes the at-rest copy. That is safe because the
+    // copy is stored content-addressed, and restricting it to the last one out
+    // would risk nobody publishing at all when a peer drops off the network.
+    if (path) await this.vaultSync?.publishDrawingAtRest(path);
   }
 
   private effectiveUser(): { name: string; color: string } {
@@ -729,19 +731,26 @@ export default class LivePresencePlugin extends Plugin {
   // Track the active file + editor and publish them.
   private updateActiveContext(): void {
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    const activePath = view?.file?.path ?? null;
-    // Remember the last markdown note we were actually in, so the sidebar keeps
-    // showing it when a non-note view (its own button, the roster) takes focus.
-    if (activePath) this.lastMarkdownPath = activePath;
-    // Co-editing follows a single file; leaving it ends the session.
-    if (this.binding.active && this.binding.path !== activePath) {
-      void this.binding.disengage();
-    }
-    this.activeCm = view ? (getCmView(view) ?? null) : null;
-    // With a drawing in front there is no MarkdownView, so without this the
-    // roster would show "no note open" while someone is drawing.
+    const focusedPath = view?.file?.path ?? null;
+    if (focusedPath) this.lastMarkdownPath = focusedPath;
+    // The "effective" note stays the open note even when a sidebar (or the
+    // roster / a button) takes focus - so clicking the sidebar does not throw us
+    // out of the document.
+    const notePath = this.activePath();
     const drawingPath = activeDrawingView(this.app)?.file?.path ?? null;
-    this.presence.setFile(activePath ?? drawingPath);
+    const effective = notePath ?? drawingPath;
+
+    // Co-editing follows one note. Disengage only when the bound note is gone
+    // (closed) or a DIFFERENT note becomes effective - NOT when a sidebar merely
+    // takes focus while the note stays open.
+    if (this.binding.active) {
+      const boundOpen = this.binding.path != null && this.isPathOpen(this.binding.path);
+      const switchedNote = notePath != null && this.binding.path !== notePath;
+      if (!boundOpen || switchedNote) void this.binding.disengage();
+    }
+
+    this.activeCm = view ? (getCmView(view) ?? null) : null;
+    this.presence.setFile(effective);
     if (view && this.activeCm) {
       const sel = this.activeCm.state.selection.main;
       this.presence.setCursor({
@@ -749,11 +758,14 @@ export default class LivePresencePlugin extends Plugin {
         head: sel.head,
         docLen: this.activeCm.state.doc.length,
       });
-    } else {
+    } else if (!effective) {
+      // Only drop our cursor when we truly have no note; when a sidebar has
+      // focus but the note is still open, keep the last cursor so others still
+      // see where we are.
       this.presence.setCursor(null);
     }
     this.refreshRemoteCursors();
-    this.refreshRosterVersions(); // the active note changed -> update the sidebar
+    this.refreshRosterVersions();
     this.evaluateCoedit();
     this.evaluateDrawingCoedit();
   }

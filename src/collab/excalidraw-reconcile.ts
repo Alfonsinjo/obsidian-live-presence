@@ -126,7 +126,19 @@ export function reconcileElements(
     }
   }
 
-  return { elements: orderByIndex(out), changed };
+  const ordered = orderByIndex(out);
+  // Reordering alone is a change too. Without this, two peers holding identical
+  // elements in a different stacking order would each decide "nothing changed"
+  // and render the drawing differently for ever.
+  if (!changed && ordered.length === localElements.length) {
+    for (let i = 0; i < ordered.length; i++) {
+      if (ordered[i] !== localElements[i]) {
+        changed = true;
+        break;
+      }
+    }
+  }
+  return { elements: ordered, changed };
 }
 
 // A tombstone can be dropped from the shared map once it is old enough that no
@@ -151,11 +163,17 @@ export function isExpiredTombstone(el: ExcalElement, now: number = Date.now()): 
 export function elementsToPublish(
   localElements: readonly ExcalElement[],
   shared: ReadonlyMap<string, ExcalElement>,
+  now: number = Date.now(),
 ): ExcalElement[] {
   const out: ExcalElement[] = [];
   for (const local of localElements) {
     const remote = shared.get(local.id);
     if (!remote) {
+      // Absent from the shared map. Normally that means the room has not seen
+      // this element yet - but a tombstone old enough to have been swept is
+      // absent on purpose, and re-publishing it would undo every sweep and make
+      // the room grow for ever.
+      if (isExpiredTombstone(local, now)) continue;
       out.push(local);
       continue;
     }

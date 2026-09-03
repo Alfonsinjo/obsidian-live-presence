@@ -30,14 +30,13 @@ export type DrawingAction =
   | "fetch";
 
 export interface DrawingState {
-  // Is there a local file for this path?
+  // Is there a usable local file for this path? A placeholder that has not been
+  // downloaded yet counts as absent, so it gets replaced by the real drawing.
   existsLocally: boolean;
   // Does the shared index list the path (any entry, including a tombstone)?
   inIndex: boolean;
   // Is the index entry a tombstone (deleted elsewhere)?
   tombstone: boolean;
-  // Is a co-editing session for this drawing currently attached?
-  engaged: boolean;
 }
 
 // A local file change (an Excalidraw autosave, usually). Autosave fires on a timer
@@ -70,17 +69,14 @@ export function onDrawingIndexChange(state: DrawingState): DrawingAction {
 
 // A co-editing session just ended (drawing closed, or co-editing switched off).
 // This is the moment the at-rest copy is refreshed, so peers who never opened the
-// drawing still end up with the current version.
+// drawing still end up with the current version. Every leaving client does this,
+// not just the last one: the copy is stored content-addressed, so two clients
+// publishing different serialisations of the same scene produce two immutable
+// blobs and one index entry wins - there is nothing to corrupt. Restricting it to
+// "the last one out" would instead risk nobody publishing at all, because a peer
+// that crashed still lingers in the participant list for a while.
 export function onDrawingDisengage(state: DrawingState): DrawingAction {
   if (!state.existsLocally) return "ignore";
   if (state.tombstone) return "ignore";
   return "publish";
-}
-
-// Drawings must never go through the three-way line merge used for notes: their
-// body is one machine-generated (usually LZ-compressed) block, and a line merge of
-// it produces a file that no longer opens. A drawing is published as-is; conflicting
-// edits were already resolved element by element in the drawing room.
-export function drawingUsesRawPush(): true {
-  return true;
 }
