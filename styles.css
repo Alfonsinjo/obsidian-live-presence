@@ -244,6 +244,40 @@
   font-weight: 600;
 }
 
+/* Festes Offline-Banner (immer sichtbar, oben rechts, in jeder Ansicht) */
+.lp-offline-banner {
+  position: fixed;
+  top: 48px;
+  right: 20px;
+  z-index: 1000;
+  max-width: 340px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--color-red, #e5484d);
+  color: #fff;
+  font-size: 0.82em;
+  font-weight: 500;
+  line-height: 1.35;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+}
+.lp-offline-banner-dot {
+  flex: 0 0 auto;
+  animation: lp-offline-pulse 1.4s ease-in-out infinite;
+}
+@keyframes lp-offline-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
 /* Versionen-Block in der Seitenleiste */
 .lp-roster h4.lp-section-top {
   margin-top: 18px;

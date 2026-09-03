@@ -29,9 +29,10 @@ export default class LivePresencePlugin extends Plugin {
   private vaultSync: VaultSync | null = null;
   private coeditEngageTimer: number | null = null;
   private statusBarEl!: HTMLElement;
-  // Persistent red toast shown while the connection is down.
-  private offlineNotice: Notice | null = null;
-  private wasConnected = false;
+  // Fixed banner shown in every view (top-right) while the connection is down.
+  private offlineBanner: HTMLElement | null = null;
+  private offlineShowTimer: number | null = null;
+  private offlineBannerVisible = false;
   // CodeMirror view of the file that currently has focus; used for cursor reporting.
   private activeCm: EditorView | null = null;
   // Full name resolved from the profile database.
@@ -247,14 +248,14 @@ export default class LivePresencePlugin extends Plugin {
     // cannot be reached. A short poll covers a status event we might have missed.
     {
       // Locked until we are actually connected: a connection is always required.
-      setEditingOnline(false);
+      this.setOffline(true);
       new Notice("Live Presence: Versuche Verbindung zur Datenbank aufzubauen …");
       let settled = false;
       const succeed = () => {
         if (settled) return;
         settled = true;
         window.clearTimeout(timer);
-        setEditingOnline(true);
+        this.setOffline(false);
         const n = new Notice("Erfolgreich mit Live Presence verbunden");
         n.noticeEl.addClass("lp-notice-success");
       };
@@ -262,6 +263,7 @@ export default class LivePresencePlugin extends Plugin {
         if (settled) return;
         settled = true;
         window.clearTimeout(timer);
+        this.setOffline(true);
         new Notice(msg);
       };
       const timer = window.setTimeout(
@@ -310,30 +312,60 @@ export default class LivePresencePlugin extends Plugin {
   }
 
   // Editing requires a live connection. While offline we lock all note editing
-  // and show a persistent red banner; on reconnect we unlock and confirm.
+  // and show a fixed red banner (visible in every view); on reconnect we unlock.
   private watchConnection(): void {
     this.presence?.onStatus((status) => {
-      if (status === "connected") {
-        this.wasConnected = true;
-        setEditingOnline(true);
-        if (this.offlineNotice) {
-          this.offlineNotice.hide();
-          this.offlineNotice = null;
-          const n = new Notice("Live Presence: Wieder verbunden. Bearbeitung ist wieder möglich.");
-          n.noticeEl.addClass("lp-notice-success");
-        }
-      } else if (status === "disconnected" || status === "error") {
-        setEditingOnline(false);
-        if (!this.offlineNotice) {
-          this.offlineNotice = new Notice(
-            "Sie sind offline. Der Fortschritt wird NICHT in der Cloud gespeichert und die Bearbeitung ist gesperrt. " +
-              "Bitte schreiben Sie solange in ein privates Textdokument und fügen Sie die Inhalte nach dem Wiederverbinden ein, um Probleme zu vermeiden.",
-            0,
-          );
-          this.offlineNotice.noticeEl.addClass("lp-notice-error");
-        }
-      }
+      if (status === "connected") this.setOffline(false);
+      else if (status === "disconnected" || status === "error") this.setOffline(true);
     });
+  }
+
+  private ensureOfflineBanner(): HTMLElement {
+    if (!this.offlineBanner) {
+      const el = document.body.createDiv({ cls: "lp-offline-banner" });
+      el.createSpan({ cls: "lp-offline-banner-dot", text: "●" });
+      el.createSpan({
+        text:
+          "Sie sind offline – Bearbeitung gesperrt. Der Fortschritt wird nicht in der Cloud gespeichert. " +
+          "Bitte solange in ein privates Dokument schreiben und die Inhalte nach dem Wiederverbinden einfügen.",
+      });
+      el.hide();
+      this.offlineBanner = el;
+      this.register(() => {
+        el.remove();
+        this.offlineBanner = null;
+      });
+    }
+    return this.offlineBanner;
+  }
+
+  // Central driver for the offline state: locks editing and shows/hides the
+  // fixed banner. Showing is delayed so a quick reconnect at startup does not
+  // flash the banner. Does nothing when the plugin is not configured.
+  private setOffline(offline: boolean): void {
+    const configured = !!this.settings.serverUrl && !!this.settings.authUser;
+    if (!configured) offline = false;
+    setEditingOnline(!offline);
+    const banner = this.ensureOfflineBanner();
+    if (offline) {
+      if (this.offlineBannerVisible || this.offlineShowTimer !== null) return;
+      this.offlineShowTimer = window.setTimeout(() => {
+        this.offlineShowTimer = null;
+        this.offlineBannerVisible = true;
+        banner.show();
+      }, 2000);
+    } else {
+      if (this.offlineShowTimer !== null) {
+        window.clearTimeout(this.offlineShowTimer);
+        this.offlineShowTimer = null;
+      }
+      if (this.offlineBannerVisible) {
+        this.offlineBannerVisible = false;
+        banner.hide();
+        const n = new Notice("Live Presence: Wieder verbunden. Bearbeitung ist wieder möglich.");
+        n.noticeEl.addClass("lp-notice-success");
+      }
+    }
   }
 
   // A placeholder note just finished downloading: start co-editing if it is the
@@ -445,6 +477,8 @@ export default class LivePresencePlugin extends Plugin {
     const dot = this.statusBarEl.createSpan({ cls: "lp-roster-dot" });
     dot.style.backgroundColor = online ? "var(--color-green, #3ba55d)" : "var(--text-faint, #888)";
     this.statusBarEl.createSpan({ text: ` ${n} online` });
+    // Keep the banner/lock in sync even if a status event was missed.
+    if (this.presence) this.setOffline(!online);
   }
 
   // Push the remote cursors of each file into its open editor(s).
