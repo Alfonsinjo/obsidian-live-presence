@@ -1,5 +1,5 @@
 import { requestUrl } from "obsidian";
-import { couchBase } from "./profile";
+import { authHeader, couchBase } from "./profile";
 
 export interface ConnectionCheck {
   ok: boolean;
@@ -22,17 +22,37 @@ export async function testConnection(
 
   const base = couchBase(serverUrl);
 
-  // 1) Is the server reachable, and is it actually the right server?
-  let welcome: { status: number; json?: { couchdb?: string } };
+  // 1) Is the server reachable, and is it actually the right server? Send the
+  // credentials, because the server requires a valid user even for the root
+  // endpoint (require_valid_user), so an unauthenticated request answers 401.
+  // A 401 with a CouchDB signature still proves we reached the right server.
+  let welcome: {
+    status: number;
+    json?: { couchdb?: string; error?: string };
+    headers?: Record<string, string>;
+  };
   try {
-    welcome = await requestUrl({ url: `${base}/`, method: "GET", throw: false });
+    welcome = await requestUrl({
+      url: `${base}/`,
+      method: "GET",
+      headers: { Authorization: authHeader(user, pass) },
+      throw: false,
+    });
   } catch {
     return {
       ok: false,
       reason: "Server-URL nicht erreichbar. Bitte die URL und die Netzwerkverbindung prüfen.",
     };
   }
-  if (welcome.status !== 200 || welcome.json?.couchdb !== "Welcome") {
+  const serverHdr = String(welcome.headers?.server ?? welcome.headers?.Server ?? "");
+  const looksLikeCouch =
+    welcome.json?.couchdb === "Welcome" ||
+    welcome.json?.error === "unauthorized" ||
+    /couchdb/i.test(serverHdr);
+  if (welcome.status === 200 && welcome.json?.couchdb !== "Welcome") {
+    return { ok: false, reason: "Die Server-URL zeigt nicht auf den richtigen Server. Bitte die URL prüfen." };
+  }
+  if (!looksLikeCouch && welcome.status !== 401 && welcome.status !== 403) {
     return { ok: false, reason: "Die Server-URL zeigt nicht auf den richtigen Server. Bitte die URL prüfen." };
   }
 
