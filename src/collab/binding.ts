@@ -44,13 +44,6 @@ export class CollabBinding {
   private serverUrl = "";
   private auth: Auth | null = null;
   private getBaseHash: BaseHashLookup | null = null;
-  // Offline handling: while disconnected we detach the live CRDT so our edits
-  // stay a clean local version, then line-merge on reconnect instead of letting
-  // Yjs interleave two people's same-line edits into one mashed line.
-  private everSynced = false;
-  private offline = false;
-  private baseAtDisconnect = "";
-  private mergingReconnect = false;
 
   baseExtension(): Extension {
     return this.compartment.of([]);
@@ -61,11 +54,6 @@ export class CollabBinding {
   }
   get active(): boolean {
     return this.provider !== null;
-  }
-  // True while our own connection is down: the binding must be kept alive so the
-  // reconnect line-merge owns re-entry (and whole-vault sync stays away).
-  isOffline(): boolean {
-    return this.offline;
   }
 
   async engage(
@@ -96,8 +84,6 @@ export class CollabBinding {
       this.serverUrl = serverUrl;
       this.auth = auth;
       this.getBaseHash = getBaseHash ?? null;
-      this.everSynced = false;
-      this.offline = false;
 
       const synced = await this.waitForSync(provider, 8000);
       if (this.gen !== gen || this.destroyed(view)) return;
@@ -111,7 +97,6 @@ export class CollabBinding {
         await this.disengage();
         return;
       }
-      this.everSynced = true;
 
       // Announce ourselves in the doc room first (used for the seed election and by yCollab).
       provider.awareness.setLocalStateField("user", {
@@ -160,17 +145,9 @@ export class CollabBinding {
       if (this.gen !== gen || this.destroyed(view)) return;
 
       this.bindEditor();
-
-      // Detach the live CRDT when the socket drops so our offline edits stay a
-      // clean local version; re-attach with a line merge when it comes back.
-      provider.on("status", (e: { status: string }) => {
-        if (this.provider !== provider) return;
-        if (e.status === "disconnected") this.goOffline();
-      });
-      provider.on("sync", (isSynced: boolean) => {
-        if (this.provider !== provider) return;
-        if (isSynced && this.offline) void this.reconnectMerge(gen);
-      });
+      // A dropped connection needs no special handling: editing is locked while
+      // offline (a connection is required to write), so nothing diverges and
+      // Yjs resynchronises cleanly on its own when the socket returns.
     } catch (err) {
       logProblem("error", "Co-Editing Fehler", { path, err: String(err) });
       new Notice("Live Presence: Co-Editing-Fehler.");
@@ -188,48 +165,6 @@ export class CollabBinding {
     view.dispatch({
       effects: this.compartment.reconfigure(Array.isArray(ext) ? [...ext] : [ext]),
     });
-  }
-
-  // Socket dropped: remember the last shared state and detach the live CRDT so
-  // further edits are plain editor edits (not fed into the now-stale doc).
-  private goOffline(): void {
-    if (this.offline || !this.everSynced) return;
-    const view = this.view;
-    const doc = this.doc;
-    if (!view || !doc || this.destroyed(view)) return;
-    this.offline = true;
-    this.baseAtDisconnect = doc.getText("content").toString();
-    try {
-      view.dispatch({ effects: this.compartment.reconfigure([]) });
-    } catch {
-      // view may be gone
-    }
-  }
-
-  // Back online: three-way merge the common base (state at disconnect), our
-  // editor content, and the freshly synced shared text, then re-attach the CRDT.
-  private async reconnectMerge(gen: number): Promise<void> {
-    if (!this.offline || this.mergingReconnect) return;
-    this.mergingReconnect = true;
-    try {
-      const view = this.view;
-      const doc = this.doc;
-      const path = this.path;
-      if (!view || !doc || !path || this.gen !== gen || this.destroyed(view)) return;
-      const text = doc.getText("content");
-      const local = normalizeLineEndings(view.state.doc.toString());
-      const remote = text.toString();
-      const merged = await this.mergeShared(path, this.baseAtDisconnect, local, remote);
-      if (this.gen !== gen || this.destroyed(view)) return;
-
-      if (this.user) registerAuthor(doc, this.user);
-      applyMinimalYTextUpdate(doc, text, merged); // publish the merged result
-      applyMinimalCmUpdate(view, merged); // and show it in the editor
-    } finally {
-      this.offline = false;
-      this.mergingReconnect = false;
-      this.bindEditor();
-    }
   }
 
   // Recover the common ancestor for an engage-time divergence from the change
@@ -275,8 +210,6 @@ export class CollabBinding {
     this.path = null;
     this.user = null;
     this.onConflict = null;
-    this.offline = false;
-    this.everSynced = false;
 
     if (view && !this.destroyed(view)) {
       try {
