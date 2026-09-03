@@ -440,14 +440,18 @@ export default class LivePresencePlugin extends Plugin {
     }
   }
 
-  // Connectivity check. The network flag flips instantly when the network is
-  // gone, and the WebSocket's own connected flag reflects the live link to the
-  // server. We deliberately do not add an HTTP probe: a cross-origin fetch is
-  // unreliable inside Obsidian and would falsely report offline while connected.
+  // Connectivity check. The WebSocket's own connected flag is the authority: if
+  // the live link to the server is up, we are online. We deliberately do NOT
+  // gate on navigator.onLine here - inside Obsidian it can be stuck false and
+  // would then keep showing offline while actually connected. (The window
+  // "offline" event is still used elsewhere as an instant lock hint.)
   private heartbeat(): void {
     if (!this.settings.serverUrl || !this.settings.authUser) return;
-    const online = navigator.onLine && (this.presence?.isConnected() ?? false);
-    this.setOffline(!online);
+    const wsUp = this.presence?.isConnected() ?? false;
+    if (!wsUp && !this.versionBlocked) {
+      logProblem("warn", "heartbeat offline", { wsUp, onLine: navigator.onLine });
+    }
+    this.setOffline(!wsUp);
   }
 
   // Central driver for the offline state: locks editing and shows/hides the
