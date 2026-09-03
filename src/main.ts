@@ -4,6 +4,7 @@ import { listChangelog } from "./changelog";
 import { CollabBinding } from "./collab/binding";
 import { ConflictModal } from "./conflict-modal";
 import { editingLockExtension, setEditingOnline } from "./editing-lock";
+import { configureLogger, logProblem } from "./logger";
 import type { MergeResult } from "./merge";
 import { type DayInfo, type TimedRun, reconstructHistory } from "./history-blame";
 import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
@@ -132,6 +133,13 @@ export default class LivePresencePlugin extends Plugin {
 
     // Leave immediately on quit instead of waiting for the server-side timeout.
     this.registerDomEvent(window, "beforeunload", () => this.presence?.destroy());
+
+    // Detect a dropped connection quickly: the browser's offline event fires the
+    // moment the network is gone (instant lock), and a short heartbeat catches an
+    // unreachable server before the WebSocket's own long timeout would.
+    this.registerDomEvent(window, "offline", () => this.setOffline(true));
+    this.registerDomEvent(window, "online", () => void this.heartbeat());
+    this.registerInterval(window.setInterval(() => void this.heartbeat(), 5000));
   }
 
   onunload(): void {
@@ -247,6 +255,7 @@ export default class LivePresencePlugin extends Plugin {
     // startup as well as on manual connect), and a clear notice when the server
     // cannot be reached. A short poll covers a status event we might have missed.
     {
+      configureLogger(this.settings.serverUrl, this.settings.authUser, this.manifest.version);
       // Locked until we are actually connected: a connection is always required.
       this.setOffline(true);
       new Notice("Live Presence: Versuche Verbindung zur Datenbank aufzubauen …");
@@ -256,6 +265,10 @@ export default class LivePresencePlugin extends Plugin {
         settled = true;
         window.clearTimeout(timer);
         this.setOffline(false);
+        logProblem("info", "verbunden", {
+          coedit: this.settings.enableCoedit,
+          vaultSync: this.settings.enableVaultSync,
+        });
         const n = new Notice("Erfolgreich mit Live Presence verbunden");
         n.noticeEl.addClass("lp-notice-success");
       };
@@ -264,6 +277,7 @@ export default class LivePresencePlugin extends Plugin {
         settled = true;
         window.clearTimeout(timer);
         this.setOffline(true);
+        logProblem("error", "Verbindung fehlgeschlagen", { detail: msg });
         new Notice(msg);
       };
       const timer = window.setTimeout(
@@ -337,6 +351,33 @@ export default class LivePresencePlugin extends Plugin {
       });
     }
     return this.offlineBanner;
+  }
+
+  // Fast connectivity check: the network flag is instant, and a short reachability
+  // probe catches a dead server well before the WebSocket notices. We only count
+  // as online when the network is up, the server answers, and the socket is up.
+  private async heartbeat(): Promise<void> {
+    if (!this.settings.serverUrl || !this.settings.authUser) return;
+    if (!navigator.onLine) {
+      this.setOffline(true);
+      return;
+    }
+    const reachable = await this.probeServer();
+    this.setOffline(!(reachable && (this.presence?.isConnected() ?? false)));
+  }
+
+  private async probeServer(): Promise<boolean> {
+    const url = `${this.settings.serverUrl.replace(/^wss:/i, "https:").replace(/^ws:/i, "http:")}/healthz`;
+    try {
+      const ctrl = new AbortController();
+      const t = window.setTimeout(() => ctrl.abort(), 3000);
+      // no-cors: we only need to know the relay answers, not read the body.
+      await fetch(url, { mode: "no-cors", cache: "no-store", signal: ctrl.signal });
+      window.clearTimeout(t);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // Central driver for the offline state: locks editing and shows/hides the

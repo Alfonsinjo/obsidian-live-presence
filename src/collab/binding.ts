@@ -5,6 +5,7 @@ import { yCollab } from "y-codemirror.next";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
 import { listChangelog, reconstructBase } from "../changelog";
+import { logProblem } from "../logger";
 import { type MergeResult, mergeThreeWay } from "../merge";
 import {
   applyMinimalCmUpdate,
@@ -101,6 +102,11 @@ export class CollabBinding {
       const synced = await this.waitForSync(provider, 8000);
       if (this.gen !== gen || this.destroyed(view)) return;
       if (!synced) {
+        logProblem("error", "Co-Editing Zeitüberschreitung", {
+          path,
+          wsconnected: provider.wsconnected,
+          online: navigator.onLine,
+        });
         new Notice("Live Presence: Co-Editing konnte nicht verbinden (Zeitüberschreitung).");
         await this.disengage();
         return;
@@ -166,7 +172,7 @@ export class CollabBinding {
         if (isSynced && this.offline) void this.reconnectMerge(gen);
       });
     } catch (err) {
-      console.error("Live Presence: co-editing setup failed:", err);
+      logProblem("error", "Co-Editing Fehler", { path, err: String(err) });
       new Notice("Live Presence: Co-Editing-Fehler.");
       await this.disengage();
     }

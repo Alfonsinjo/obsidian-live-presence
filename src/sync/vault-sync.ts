@@ -11,6 +11,7 @@ import {
   sleep,
 } from "../utils";
 import { type ChangeEntry, listChangelog, reconstructBase } from "../changelog";
+import { logProblem } from "../logger";
 import { type MergeResult, mergeThreeWay } from "../merge";
 import { blobExists, downloadBlob, uploadBlob } from "./blobs";
 
@@ -289,6 +290,7 @@ export class VaultSync {
       // Keep the placeholder if we got nothing back: dropping it here without
       // writing real content would let the placeholder be pushed to the server.
       if (content === null || content.length === 0) {
+        logProblem("warn", "Notiz laden fehlgeschlagen (leer/offline)", { path });
         notice.setMessage(`„${name}" konnte nicht geladen werden. Besteht eine Verbindung?`);
         window.setTimeout(() => notice.hide(), 5000);
         return;
@@ -301,6 +303,7 @@ export class VaultSync {
       this.onMaterialized(path);
     } catch (err) {
       this.stubs.add(path);
+      logProblem("error", "Notiz laden fehlgeschlagen", { path, err: String(err) });
       notice.setMessage(`„${name}" konnte nicht geladen werden.`);
       window.setTimeout(() => notice.hide(), 5000);
       this.log(`materialise failed for ${path}:`, err);
