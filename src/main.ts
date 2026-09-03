@@ -39,6 +39,13 @@ export default class LivePresencePlugin extends Plugin {
   private offlineBanner: HTMLElement | null = null;
   private offlineShowTimer: number | null = null;
   private offlineBannerVisible = false;
+  // Offline/verification state: editing stays locked while offline and during a
+  // short verification window after reconnecting (so the note is re-synced from
+  // the server before writing resumes).
+  private lockedOffline = true;
+  private hasConnected = false;
+  private verifyTimer: number | null = null;
+  private verifyNotice: Notice | null = null;
   // Set when the client is older than the server-required version: the tool is
   // locked and an update modal is shown until the user updates.
   private versionBlocked = false;
@@ -480,30 +487,81 @@ export default class LivePresencePlugin extends Plugin {
   // flash the banner. Does nothing when the plugin is not configured.
   private setOffline(offline: boolean): void {
     const configured = !!this.settings.serverUrl && !!this.settings.authUser;
-    if (!configured) offline = false;
-    // A version block keeps editing locked regardless; its modal replaces the
-    // offline banner, so do not also drive the banner here.
-    setEditingOnline(!offline && !this.versionBlocked);
-    if (this.versionBlocked) return;
-    const banner = this.ensureOfflineBanner();
+    if (!configured) {
+      this.lockedOffline = false;
+      setEditingOnline(true);
+      this.hideBannerNow();
+      return;
+    }
+    if (this.versionBlocked) {
+      setEditingOnline(false);
+      return;
+    }
+
     if (offline) {
-      if (this.offlineBannerVisible || this.offlineShowTimer !== null) return;
-      this.offlineShowTimer = window.setTimeout(() => {
-        this.offlineShowTimer = null;
-        this.offlineBannerVisible = true;
-        banner.show();
-      }, 2000);
-    } else {
-      if (this.offlineShowTimer !== null) {
-        window.clearTimeout(this.offlineShowTimer);
-        this.offlineShowTimer = null;
+      // Lock immediately; cancel any pending reconnect verification.
+      if (this.verifyTimer !== null) {
+        window.clearTimeout(this.verifyTimer);
+        this.verifyTimer = null;
       }
-      if (this.offlineBannerVisible) {
-        this.offlineBannerVisible = false;
-        banner.hide();
-        const n = new Notice("Live Presence: Wieder verbunden. Bearbeitung ist wieder möglich.");
-        n.noticeEl.addClass("lp-notice-success");
-      }
+      this.verifyNotice?.hide();
+      this.verifyNotice = null;
+      this.lockedOffline = true;
+      setEditingOnline(false);
+      this.scheduleBanner();
+      return;
+    }
+
+    // Server reachable and the socket is up.
+    if (!this.lockedOffline || this.verifyTimer !== null) return; // already online / verifying
+    this.hideBannerNow();
+
+    if (!this.hasConnected) {
+      // First connection after start: no offline edits to reconcile, unlock now.
+      this.hasConnected = true;
+      this.lockedOffline = false;
+      setEditingOnline(true);
+      return;
+    }
+
+    // Reconnected after being offline: keep editing locked for a short window so
+    // the note is re-synced from the server (and the server version adopted)
+    // before writing resumes. Announce each step via a toast.
+    this.hasConnected = true;
+    setEditingOnline(false);
+    this.verifyNotice = new Notice(
+      "Live Presence: Wieder verbunden. Gleiche das Dokument mit dem Server ab …",
+      0,
+    );
+    this.verifyTimer = window.setTimeout(() => {
+      this.verifyTimer = null;
+      this.verifyNotice?.hide();
+      this.verifyNotice = null;
+      this.lockedOffline = false;
+      setEditingOnline(true);
+      const ok = new Notice("Live Presence: Abgeglichen – Bearbeitung wieder möglich.");
+      ok.noticeEl.addClass("lp-notice-success");
+    }, 2500);
+  }
+
+  private scheduleBanner(): void {
+    const banner = this.ensureOfflineBanner();
+    if (this.offlineBannerVisible || this.offlineShowTimer !== null) return;
+    this.offlineShowTimer = window.setTimeout(() => {
+      this.offlineShowTimer = null;
+      this.offlineBannerVisible = true;
+      banner.show();
+    }, 2000);
+  }
+
+  private hideBannerNow(): void {
+    if (this.offlineShowTimer !== null) {
+      window.clearTimeout(this.offlineShowTimer);
+      this.offlineShowTimer = null;
+    }
+    if (this.offlineBannerVisible) {
+      this.offlineBannerVisible = false;
+      this.offlineBanner?.hide();
     }
   }
 
