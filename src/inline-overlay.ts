@@ -28,9 +28,16 @@ const overlayField = StateField.define<OverlayData | null>({
   create: () => null,
   update(value, tr) {
     for (const e of tr.effects) if (e.is(setOverlay)) return e.value;
-    // Offsets would no longer match after an edit, so drop the overlay.
-    if (value && tr.docChanged) return null;
-    return value;
+    if (!value || !tr.docChanged) return value;
+    // Keep the overlay aligned across edits (e.g. incoming co-editing changes)
+    // by mapping the offsets, instead of dropping it on every change.
+    const runs = value.runs
+      .map((r) => ({ ...r, from: tr.changes.mapPos(r.from, 1), to: tr.changes.mapPos(r.to, -1) }))
+      .filter((r) => r.from < r.to);
+    const faded = value.faded
+      .map((f) => ({ ...f, from: tr.changes.mapPos(f.from, 1), to: tr.changes.mapPos(f.to, -1) }))
+      .filter((f) => f.from < f.to);
+    return { ...value, runs, faded };
   },
 });
 

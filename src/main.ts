@@ -9,6 +9,7 @@ import type { MergeResult } from "./merge";
 import { UpdateModal } from "./update-modal";
 import { type VersionInfo, fetchRequiredVersion, isOutdated } from "./version";
 import { type DayInfo, type TimedRun, reconstructHistory } from "./history-blame";
+import { buildLiveBlame } from "./history-live";
 import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
 import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
@@ -751,6 +752,34 @@ export default class LivePresencePlugin extends Plugin {
       if (!silent) new Notice("Live Presence: Keine aktive Notiz.");
       return;
     }
+
+    // Author colouring: build it straight from the live document so it always
+    // matches the current text (the change log can be stale or empty).
+    if (dayFilter === undefined) {
+      const blame = await buildLiveBlame(this.settings.serverUrl, this.effectiveAuth(), path);
+      const cm = this.activeCmView();
+      if (!cm) return;
+      if (!blame || blame.runs.length === 0) {
+        if (!silent) {
+          new Notice("Live Presence: Autorenkennzeichnung ist für diese Notiz nicht verfügbar.");
+        }
+        return;
+      }
+      const docLen = cm.state.doc.length;
+      // Clamp to the editor length instead of bailing, so it always renders.
+      const runs = blame.runs
+        .map((r) => ({ ...r, from: Math.min(r.from, docLen), to: Math.min(r.to, docLen) }))
+        .filter((r) => r.from < r.to);
+      cm.dispatch({
+        effects: setOverlay.of({ runs, faded: [], legend: blame.legend, title: "Autoren" }),
+      });
+      this.overlayMode = "authors";
+      this.overlayDay = null;
+      this.refreshRosters();
+      return;
+    }
+
+    // Day history (currently hidden) still comes from the change log.
     if (!this.historyCache || this.historyCache.path !== path) await this.loadHistory(path);
     const cache = this.historyCache;
     const cm = this.activeCmView();
@@ -760,10 +789,10 @@ export default class LivePresencePlugin extends Plugin {
       if (!silent) new Notice("Live Presence: Verlauf noch nicht synchron – kurz warten und erneut versuchen.");
       return;
     }
-    const title = dayFilter ? `Änderungen am ${new Date(dayFilter).toLocaleDateString()}` : "Autoren";
+    const title = `Änderungen am ${new Date(dayFilter).toLocaleDateString()}`;
     cm.dispatch({ effects: setOverlay.of({ runs: built.runs, faded: [], legend: built.legend, title }) });
-    this.overlayMode = dayFilter ? "day" : "authors";
-    this.overlayDay = dayFilter ?? null;
+    this.overlayMode = "day";
+    this.overlayDay = dayFilter;
     this.refreshRosters();
   }
 
