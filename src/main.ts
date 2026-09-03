@@ -45,6 +45,9 @@ export default class LivePresencePlugin extends Plugin {
   private updateModalOpen = false;
   // CodeMirror view of the file that currently has focus; used for cursor reporting.
   private activeCm: EditorView | null = null;
+  // Last opened markdown note, so the sidebar keeps showing it even when the
+  // sidebar itself (a non-note view) is focused.
+  private lastMarkdownPath: string | null = null;
   // Full name resolved from the profile database.
   private displayName = "";
   // In-editor history overlay state.
@@ -574,7 +577,14 @@ export default class LivePresencePlugin extends Plugin {
       this.presence.setCursor(null);
     }
     this.refreshRemoteCursors();
+    this.refreshRosterVersions(); // the active note changed -> update the sidebar
     this.evaluateCoedit();
+  }
+
+  private refreshRosterVersions(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(ROSTER_VIEW_TYPE)) {
+      if (leaf.view instanceof RosterView) leaf.view.refreshVersions();
+    }
   }
 
   private onPresenceChange(): void {
@@ -632,7 +642,21 @@ export default class LivePresencePlugin extends Plugin {
   // Path of the current note (Markdown only), even when a sidebar has focus.
   private activePath(): string | null {
     const file = this.app.workspace.getActiveFile();
-    return file && file.extension === "md" ? file.path : null;
+    if (file && file.extension === "md") {
+      this.lastMarkdownPath = file.path;
+      return file.path;
+    }
+    // The sidebar (or another non-note view) is focused: keep showing the last
+    // opened note as long as it is still open somewhere.
+    if (this.lastMarkdownPath && this.isPathOpen(this.lastMarkdownPath)) return this.lastMarkdownPath;
+    this.lastMarkdownPath = null;
+    return null;
+  }
+
+  private isPathOpen(path: string): boolean {
+    return this.app.workspace
+      .getLeavesOfType("markdown")
+      .some((l) => (l.view as unknown as { file?: { path?: string } }).file?.path === path);
   }
 
   // Load and cache the time-aware blame of a note; returns the days with changes.

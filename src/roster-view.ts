@@ -1,4 +1,4 @@
-import { ItemView, type WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, type WorkspaceLeaf } from "obsidian";
 import type { RemoteEntry } from "./types";
 
 export const ROSTER_VIEW_TYPE = "live-presence-roster";
@@ -62,15 +62,6 @@ export class RosterView extends ItemView {
     this.renderVersions();
   }
 
-  private iconButton(parent: HTMLElement, icon: string, label: string, active: boolean): HTMLElement {
-    const btn = parent.createEl("button", { cls: "clickable-icon lp-icon-btn" });
-    setIcon(btn, icon);
-    btn.setAttribute("aria-label", label);
-    btn.setAttribute("title", label);
-    if (active) btn.addClass("lp-btn-active");
-    return btn;
-  }
-
   private renderPresence(): void {
     const root = this.presenceEl;
     root.empty();
@@ -121,31 +112,35 @@ export class RosterView extends ItemView {
   private renderVersions(): void {
     const root = this.versionEl;
     root.empty();
-    root.createEl("h4", { text: "Wer hat was geschrieben", cls: "lp-section-top" });
+    root.createEl("h4", { text: "Autorenkennzeichnung", cls: "lp-section-top" });
 
     const path = this.cb.getActivePath();
     if (!path) {
-      root.createDiv({ cls: "lp-roster-empty", text: "Keine Notiz geöffnet." });
+      root.createDiv({
+        cls: "lp-roster-empty",
+        text: "Es ist derzeit keine Notiz geöffnet.",
+      });
       return;
     }
 
     const label = path.replace(/\.md$/, "").split("/").pop() ?? path;
     root.createDiv({ cls: "lp-ver-file", text: label }).setAttr("title", path);
 
-    const info = this.cb.overlayInfo();
-    const actions = root.createDiv({ cls: "lp-ver-actions" });
-    this.iconButton(actions, "users", "Autoren im Text hervorheben", info.mode === "authors").onClickEvent(
-      () => this.cb.onToggleAuthors(),
-    );
-    if (info.mode) {
-      this.iconButton(actions, "eye-off", "Hervorhebung im Text ausschalten", false).onClickEvent(() =>
-        this.cb.onClearOverlay(),
-      );
-    }
     root.createDiv({
       cls: "lp-ver-hint",
-      text: "Farbige Markierung zeigt, wer welche Passage geschrieben hat (per Zeiger für Details).",
+      text:
+        "Die farbliche Markierung kennzeichnet, welche Textpassagen von welcher Person verfasst wurden. " +
+        "Bewegen Sie den Zeiger über eine Passage, um Verfasser und Zeitpunkt anzuzeigen.",
     });
+
+    const info = this.cb.overlayInfo();
+    const active = info.mode === "authors";
+    const btn = root.createEl("button", {
+      cls: "lp-ver-toggle",
+      text: active ? "Autorenkennzeichnung ausblenden" : "Autorenkennzeichnung anzeigen",
+    });
+    if (active) btn.addClass("mod-cta");
+    btn.onClickEvent(() => (active ? this.cb.onClearOverlay() : this.cb.onToggleAuthors()));
     // The per-day version history is temporarily hidden and returns in a later
     // update once it is reliable.
   }

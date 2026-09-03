@@ -480,7 +480,9 @@ export class VaultSync {
     if (this.kindOf(path) === "t" && this.isCoEditing(path)) return;
     let push = this.pushers.get(path);
     if (!push) {
-      push = debounce((p: string) => void this.pushLocalFile(p), 600);
+      // Short debounce: coalesce rapid changes but propagate new files/edits
+      // to other devices quickly.
+      push = debounce((p: string) => void this.pushLocalFile(p), 250);
       this.pushers.set(path, push);
     }
     push(path);

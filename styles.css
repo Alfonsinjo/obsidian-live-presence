@@ -318,6 +318,13 @@
   color: var(--text-muted);
   margin: 4px 0 8px;
 }
+.lp-ver-toggle {
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 10px;
+  font-size: 0.85em;
+  cursor: pointer;
+}
 .lp-ver-clickable {
   cursor: pointer;
   border-radius: 4px;
