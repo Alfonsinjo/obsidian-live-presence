@@ -424,15 +424,22 @@
 .lp-statusbar { cursor: pointer; }
 .lp-statusbar .lp-roster-dot { display: inline-block; margin-right: 4px; vertical-align: middle; }
 
-/* Cloud badge for files that are only on the server (never opened/downloaded) */
+/* Cloud badge for files that are only on the server (never opened/downloaded).
+   Uses the Lucide "cloud" glyph as a mask so it takes the accent colour. */
+:root {
+  --lp-cloud-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z'/%3E%3C/svg%3E");
+}
 .nav-file-title.lp-cloud-file::after {
-  content: "☁";
+  content: "";
   margin-left: auto;
-  padding-left: 6px;
-  color: var(--text-accent, #7aa2f7);
-  opacity: 0.8;
-  font-size: 0.95em;
   flex: 0 0 auto;
+  align-self: center;
+  width: 15px;
+  height: 15px;
+  background-color: var(--text-accent, #7aa2f7);
+  opacity: 0.85;
+  -webkit-mask: var(--lp-cloud-mask) center / contain no-repeat;
+  mask: var(--lp-cloud-mask) center / contain no-repeat;
 }
 .nav-file-title.lp-cloud-file .nav-file-title-content {
   opacity: 0.7;
