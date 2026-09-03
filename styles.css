@@ -423,3 +423,18 @@
 /* Statusleiste */
 .lp-statusbar { cursor: pointer; }
 .lp-statusbar .lp-roster-dot { display: inline-block; margin-right: 4px; vertical-align: middle; }
+
+/* Cloud badge for files that are only on the server (never opened/downloaded) */
+.nav-file-title.lp-cloud-file::after {
+  content: "☁";
+  margin-left: auto;
+  padding-left: 6px;
+  color: var(--text-accent, #7aa2f7);
+  opacity: 0.8;
+  font-size: 0.95em;
+  flex: 0 0 auto;
+}
+.nav-file-title.lp-cloud-file .nav-file-title-content {
+  opacity: 0.7;
+  font-style: italic;
+}

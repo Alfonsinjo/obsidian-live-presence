@@ -186,6 +186,10 @@ export default class LivePresencePlugin extends Plugin {
     // An Excalidraw view becomes usable asynchronously and fires no workspace
     // event when it does, so the drawing session is re-evaluated periodically.
     this.registerInterval(window.setInterval(() => this.evaluateDrawingCoedit(), 2000));
+    // Keep the cloud badges on not-yet-downloaded files current: new placeholder
+    // files appear, items render as the tree scrolls, and files get downloaded.
+    this.registerInterval(window.setInterval(() => this.refreshCloudIcons(), 2000));
+    this.registerEvent(this.app.workspace.on("layout-change", () => this.refreshCloudIcons()));
   }
 
   onunload(): void {
@@ -683,6 +687,18 @@ export default class LivePresencePlugin extends Plugin {
   // active note (it was skipped while it was still a stub).
   private onNoteMaterialized(path: string): void {
     if (this.app.workspace.getActiveFile()?.path === path) this.evaluateCoedit();
+    this.refreshCloudIcons(); // it is now downloaded -> drop its cloud badge
+  }
+
+  // Mark files that only exist on the server (never opened / not downloaded yet)
+  // with a cloud badge in the file explorer, like OneDrive's online-only files.
+  private refreshCloudIcons(): void {
+    const sync = this.vaultSync;
+    const items = document.querySelectorAll<HTMLElement>(".nav-file-title[data-path]");
+    for (const el of Array.from(items)) {
+      const path = el.getAttribute("data-path") ?? "";
+      el.toggleClass("lp-cloud-file", !!sync && sync.isStub(path));
+    }
   }
 
   // Inform the user that their local copy diverged from the server. The server
