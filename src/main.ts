@@ -65,6 +65,11 @@ export default class LivePresencePlugin extends Plugin {
   // Last opened markdown note, so the sidebar keeps showing it even when the
   // sidebar itself (a non-note view) is focused.
   private lastMarkdownPath: string | null = null;
+  // Note the sidebar version section was last rendered for, so it is only
+  // re-rendered when the note actually changes - not on every focus change,
+  // which would recreate its buttons mid-click and swallow the first click.
+  private lastVersionPath: string | null = null;
+  private lastOverlayPath: string | null = null;
   // Full name resolved from the profile database.
   private displayName = "";
   // In-editor history overlay state.
@@ -779,7 +784,13 @@ export default class LivePresencePlugin extends Plugin {
       this.presence.setCursor(null);
     }
     this.refreshRemoteCursors();
-    this.refreshRosterVersions();
+    // Only re-render the version section when the note actually changed;
+    // otherwise a focus change (e.g. clicking the sidebar) would recreate its
+    // buttons between mousedown and click and swallow the first click.
+    if (notePath !== this.lastVersionPath) {
+      this.lastVersionPath = notePath;
+      this.refreshRosterVersions();
+    }
     this.evaluateCoedit();
     this.evaluateDrawingCoedit();
   }
@@ -1011,9 +1022,15 @@ export default class LivePresencePlugin extends Plugin {
   }
 
   private reapplyOverlayOnLeafChange(): void {
+    const notePath = this.activePath();
+    // Only react when the note actually changed. A mere focus change (clicking
+    // the sidebar) must not re-apply/re-render, or it would recreate the sidebar
+    // button between mousedown and click and swallow that click.
+    if (notePath === this.lastOverlayPath) return;
+    this.lastOverlayPath = notePath;
     this.historyCache = null; // blame is per note
     if (!this.overlayMode) return;
-    if (!this.activePath() || this.overlayMode === "day") {
+    if (!notePath || this.overlayMode === "day") {
       this.clearOverlay();
       return;
     }
