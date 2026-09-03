@@ -14,6 +14,7 @@ import { blameFromDoc, buildLiveBlame } from "./history-live";
 import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
 import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
+import { ProblemModal } from "./problem-modal";
 import { fetchProfileName, saveProfileName } from "./profile";
 import { type RemoteCursor, remoteCursorsField, setRemoteCursors } from "./remote-cursors";
 import { ROSTER_VIEW_TYPE, RosterView } from "./roster-view";
@@ -107,6 +108,8 @@ export default class LivePresencePlugin extends Plugin {
           overlayInfo: () => this.overlayInfo(),
           loadDays: (path) => this.loadHistory(path),
           onSelectDay: (day) => void this.showDayOverlay(day),
+          onReportProblem: () =>
+            new ProblemModal(this.app, this.manifest.version, this.effectiveUser().name).open(),
         }),
     );
 

@@ -19,6 +19,7 @@ interface RosterCallbacks {
   overlayInfo: () => { mode: "authors" | "day" | null; day: string | null };
   loadDays: (path: string) => Promise<SidebarDay[]>;
   onSelectDay: (day: string) => void;
+  onReportProblem: () => void;
 }
 
 // Sidebar view: who is online (grouped by file), and below it the history of the
@@ -50,6 +51,12 @@ export class RosterView extends ItemView {
     this.versionEl = this.contentEl.createDiv();
     this.renderPresence();
     this.renderVersions();
+
+    // Report-a-problem button, pinned at the bottom.
+    const footer = this.contentEl.createDiv({ cls: "lp-roster-footer" });
+    footer
+      .createEl("button", { text: "Problem melden", cls: "lp-report-btn" })
+      .onClickEvent(() => this.cb.onReportProblem());
   }
 
   // Presence updates only re-render the presence section.
