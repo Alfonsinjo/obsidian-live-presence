@@ -15,9 +15,9 @@ export class NameModal extends Modal {
   }
 
   onOpen(): void {
-    this.titleEl.setText("Live Presence: Dein Name");
+    this.titleEl.setText("Live Presence: Ihr Name");
     this.contentEl.createEl("p", {
-      text: "Bitte Vor- und Nachnamen eingeben. Er wird gespeichert und den anderen im Roster und am Cursor angezeigt.",
+      text: "Bitte geben Sie Ihren Vor- und Nachnamen ein. Er erscheint bei den anderen im Roster und am Cursor.",
     });
     new Setting(this.contentEl).setName("Vor- und Nachname").addText((t) => {
       t.setPlaceholder("Vorname Nachname").setValue(this.value);

@@ -486,8 +486,8 @@ export default class LivePresencePlugin extends Plugin {
       el.createSpan({ cls: "lp-offline-banner-dot", text: "●" });
       el.createSpan({
         text:
-          "Sie sind offline – Bearbeitung gesperrt. Der Fortschritt wird nicht in der Cloud gespeichert. " +
-          "Bitte solange in ein privates Dokument schreiben und die Inhalte nach dem Wiederverbinden einfügen.",
+          "Offline – Bearbeitung gesperrt. Änderungen werden nicht gespeichert. " +
+          "Bitte notieren Sie extern und fügen Sie den Text nach dem Wiederverbinden ein.",
       });
       el.hide();
       this.offlineBanner = el;

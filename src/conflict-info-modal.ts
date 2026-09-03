@@ -60,15 +60,15 @@ export class ConflictInfoModal extends Modal {
 
     contentEl.createEl("p", {
       text:
-        `Deine lokale Fassung von „${name}" weicht von der Version auf dem Server ab. ` +
-        "Es wird immer die Version vom Server verwendet. Unten siehst du, was sich unterscheidet.",
+        `Ihre lokale Fassung von „${name}" weicht vom Server ab. Es gilt immer die ` +
+        "Server-Version. Nachfolgend die Unterschiede.",
     });
 
     const { localOnly, remoteOnly } = lineDiff(this.localText, this.remoteText);
     const block = contentEl.createDiv({ cls: "lp-conflict-block" });
 
     const mineRow = block.createDiv({ cls: "lp-conflict-row" });
-    mineRow.createDiv({ cls: "lp-conflict-label", text: "Nur in deiner Version:" });
+    mineRow.createDiv({ cls: "lp-conflict-label", text: "Nur in Ihrer Version:" });
     mineRow.createEl("pre", {
       cls: "lp-conflict-mine",
       text: localOnly.join("\n") || "(keine zusätzlichen Zeilen)",
@@ -82,7 +82,7 @@ export class ConflictInfoModal extends Modal {
     });
 
     contentEl.createEl("p", {
-      text: "Deine vollständige lokale Fassung zum Herauskopieren:",
+      text: "Ihre vollständige lokale Fassung zum Kopieren:",
     });
     const ta = contentEl.createEl("textarea", { cls: "lp-conflict-text" });
     ta.value = this.localText;
@@ -105,8 +105,8 @@ export class ConflictInfoModal extends Modal {
     contentEl.createEl("p", {
       cls: "lp-conflict-hint",
       text:
-        "Wenn du deinen Text zuerst sichern möchtest, kopiere ihn heraus und schließe Obsidian, " +
-        "bevor du fortfährst. Andernfalls wird die Server-Version übernommen.",
+        "Zum Sichern kopieren Sie Ihren Text und schließen Obsidian, bevor Sie fortfahren. " +
+        "Andernfalls wird die Server-Version übernommen.",
     });
   }
 

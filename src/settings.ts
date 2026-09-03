@@ -21,7 +21,7 @@ export class LivePresenceSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Anzeigename")
       .setDesc(
-        "Dein Vor- und Nachname. Wird beim ersten Verbinden abgefragt und im Konto (Server) gespeichert; erscheint im Roster und am Cursor.",
+        "Ihr Vor- und Nachname. Wird beim ersten Verbinden abgefragt und im Konto gespeichert; erscheint im Roster und am Cursor.",
       )
       .addText((t) => {
         t.setValue(this.plugin.settings.userName || "").setDisabled(true);
@@ -35,7 +35,7 @@ export class LivePresenceSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Farbe")
-      .setDesc("Wird automatisch und eindeutig aus deinem Namen abgeleitet.")
+      .setDesc("Wird automatisch aus Ihrem Namen abgeleitet.")
       .then((s) => {
         const swatch = s.controlEl.createDiv({ cls: "lp-color-swatch" });
         swatch.style.backgroundColor = colorFromName(this.plugin.settings.userName || "Anonym");
@@ -58,7 +58,7 @@ export class LivePresenceSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Login-Benutzer")
-      .setDesc("Dein CouchDB-Benutzer (dasselbe Konto wie bei LiveSync).")
+      .setDesc("Ihr Server-Benutzer (dasselbe Konto wie bei LiveSync).")
       .addText((t) =>
         t
           .setPlaceholder("benutzername")
@@ -97,10 +97,8 @@ export class LivePresenceSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Co-Editing aktivieren")
       .setDesc(
-        "Bearbeitet dieselbe Notiz zeichenweise in Echtzeit, sobald zwei oder mehr Personen sie geöffnet haben. " +
-          "Gilt auch für Excalidraw-Zeichnungen: dort wird die Zeichnung elementweise geteilt, " +
-          "fremde Zeiger und Auswahlen erscheinen direkt auf der Fläche. " +
-          "Anwesenheit und Cursor funktionieren unabhängig davon.",
+        "Bearbeitet dieselbe Notiz in Echtzeit, sobald zwei oder mehr Personen sie geöffnet haben " +
+          "(auch Excalidraw-Zeichnungen). Anwesenheit und Cursor funktionieren unabhängig davon.",
       )
       .addToggle((tg) =>
         tg.setValue(this.plugin.settings.enableCoedit).onChange(async (v) => {
@@ -115,10 +113,9 @@ export class LivePresenceSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Ganzen Vault über den Relay synchronisieren")
       .setDesc(
-        "Verteilt den Vault über den eigenen Server (Ersatz für externe Synchronisation). " +
-          "Notizen werden bei Bedarf geladen: es erscheinen zunächst Platzhalter, der Inhalt wird erst " +
-          "beim Öffnen einer Notiz heruntergeladen (eingebundene Bilder/PDFs kommen mit). " +
-          "Experimentell: nur mit Testdaten verwenden. Nach dem Umschalten Obsidian neu laden.",
+        "Verteilt den Vault über den eigenen Server. Notizen werden bei Bedarf geladen " +
+          "(zunächst Platzhalter, Inhalt beim Öffnen). Experimentell; nur mit Testdaten. " +
+          "Nach dem Umschalten Obsidian neu laden.",
       )
       .addToggle((tg) =>
         tg.setValue(this.plugin.settings.enableVaultSync).onChange(async (v) => {
@@ -131,8 +128,8 @@ export class LivePresenceSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Anmelden")
       .setDesc(
-        "Prüft die obigen Daten und meldet genau, was nicht stimmt (Server-URL, Benutzername oder Passwort). " +
-          "Bei aktiver Vault-Synchronisation folgt vor dem Abgleich eine Sicherheitsabfrage.",
+        "Prüft die Zugangsdaten und meldet genau, was nicht stimmt. " +
+          "Bei aktiver Vault-Synchronisation folgt eine Sicherheitsabfrage.",
       )
       .addButton((b) =>
         b

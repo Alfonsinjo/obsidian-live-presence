@@ -19,11 +19,11 @@ export class ProblemModal extends Modal {
     const { contentEl, titleEl } = this;
     titleEl.setText("Problem melden");
     contentEl.createEl("p", {
-      text: "Beschreibe kurz das Problem. Deine Meldung geht direkt an Thomas Stabel.",
+      text: "Beschreiben Sie das Problem kurz. Ihre Meldung geht an Thomas Stabel.",
     });
     const ta = contentEl.createEl("textarea", { cls: "lp-conflict-text" });
     ta.rows = 8;
-    ta.placeholder = "Was ist passiert? Was hättest du erwartet?";
+    ta.placeholder = "Was ist passiert? Was war zu erwarten?";
 
     const actions = contentEl.createDiv({ cls: "lp-conflict-actions" });
     actions.createEl("button", { text: "Senden", cls: "mod-cta" }).onClickEvent(() => this.send(ta.value));
@@ -31,7 +31,7 @@ export class ProblemModal extends Modal {
 
     contentEl.createEl("p", {
       cls: "lp-conflict-hint",
-      text: `Es öffnet sich dein E-Mail-Programm an ${CONTACT}. Die Meldung wird zusätzlich am Server hinterlegt.`,
+      text: `Öffnet Ihr E-Mail-Programm an ${CONTACT}; die Meldung wird zusätzlich am Server hinterlegt.`,
     });
     window.setTimeout(() => ta.focus(), 0);
   }
@@ -51,7 +51,7 @@ export class ProblemModal extends Modal {
     a.href = `mailto:${CONTACT}?subject=${subject}&body=${mailBody}`;
     a.click();
 
-    new Notice("Danke! Deine Meldung wurde gesendet.");
+    new Notice("Vielen Dank. Ihre Meldung wurde gesendet.");
     this.close();
   }
 

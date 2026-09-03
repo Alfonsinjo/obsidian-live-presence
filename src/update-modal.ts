@@ -21,11 +21,11 @@ export class UpdateModal extends Modal {
 
     contentEl.createEl("p", {
       text:
-        "Es ist eine neuere Version von Live Presence verfügbar. Damit alle dieselbe Version verwenden, " +
-        "ist ein Update nötig, bevor du weiterarbeiten kannst. Die Verbindung ist bis dahin pausiert.",
+        "Eine neue Version ist erforderlich, damit alle dieselbe verwenden. " +
+        "Die Bearbeitung ist bis zum Update pausiert.",
     });
     const v = contentEl.createEl("p");
-    v.createEl("strong", { text: "Deine Version: " });
+    v.createEl("strong", { text: "Ihre Version: " });
     v.appendText(`${this.current}  •  `);
     v.createEl("strong", { text: "Neue Version: " });
     v.appendText(this.latest);
@@ -38,9 +38,7 @@ export class UpdateModal extends Modal {
 
     contentEl.createEl("p", {
       cls: "lp-conflict-hint",
-      text:
-        "Jetzt aktualisieren lädt die neue Version direkt und startet Obsidian neu. " +
-        "Alternativ über BRAT: Befehlspalette, dann BRAT-Update ausführen und Obsidian neu laden.",
+      text: "Aktualisiert die App direkt und startet Obsidian neu.",
     });
   }
 

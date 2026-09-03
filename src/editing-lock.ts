@@ -34,8 +34,8 @@ export function editingLockExtension(): Extension {
     if (now - lastNotice > 4000) {
       lastNotice = now;
       new Notice(
-        "Offline: Bearbeitung gesperrt. Zum Schreiben ist eine Verbindung nötig. " +
-          "Bitte solange in ein privates Textdokument schreiben und die Inhalte später einfügen.",
+        "Offline: Bearbeitung gesperrt. Zum Schreiben ist eine Verbindung erforderlich. " +
+          "Bitte notieren Sie Ihren Text vorerst extern und fügen Sie ihn später ein.",
         4000,
       );
     }

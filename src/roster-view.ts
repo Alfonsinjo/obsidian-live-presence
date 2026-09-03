@@ -111,7 +111,7 @@ export class RosterView extends ItemView {
         const dot = row.createSpan({ cls: "lp-roster-dot" });
         dot.style.backgroundColor = e.state.user.color;
         const name = e.state.user.name || "Anonym";
-        row.createSpan({ text: e.clientId === selfId ? `${name} (du)` : name });
+        row.createSpan({ text: e.clientId === selfId ? `${name} (Sie)` : name });
       }
     }
   }
