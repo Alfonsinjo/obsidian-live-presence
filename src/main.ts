@@ -2,6 +2,8 @@ import { EditorView } from "@codemirror/view";
 import { MarkdownView, Notice, Plugin, type WorkspaceLeaf, requestUrl } from "obsidian";
 import { listChangelog } from "./changelog";
 import { CollabBinding } from "./collab/binding";
+import { ExcalidrawBinding, websocketConnector } from "./collab/excalidraw-binding";
+import { activeDrawingView, createSceneHost } from "./collab/excalidraw-host";
 import { ConflictInfoModal } from "./conflict-info-modal";
 import { editingLockExtension, setEditingOnline } from "./editing-lock";
 import { configureLogger, logProblem } from "./logger";
@@ -32,6 +34,14 @@ export default class LivePresencePlugin extends Plugin {
   settings!: LivePresenceSettings;
   presence!: PresenceConnection;
   private binding = new CollabBinding();
+  // Real-time co-editing for Excalidraw drawings. A drawing is not text in an
+  // editor, so it cannot use the CodeMirror binding above: its scene is shared
+  // element by element in its own room (see collab/excalidraw-binding.ts).
+  private excalBinding = new ExcalidrawBinding(
+    (room, auth) => websocketConnector(this.settings.serverUrl)(room, auth),
+    (level, msg, ctx) => logProblem(level, msg, ctx),
+  );
+  private drawingEngageTimer: number | null = null;
   private vaultSync: VaultSync | null = null;
   private coeditEngageTimer: number | null = null;
   private statusBarEl!: HTMLElement;
@@ -147,6 +157,11 @@ export default class LivePresencePlugin extends Plugin {
         if (this.binding.path === oldPath) {
           void this.binding.disengage().then(() => this.evaluateCoedit());
         }
+        // A drawing room is keyed by path, so a rename ends the old session and
+        // starts one for the new path.
+        if (this.excalBinding.path === oldPath) {
+          void this.excalBinding.disengage().then(() => this.evaluateDrawingCoedit());
+        }
       }),
     );
 
@@ -161,11 +176,15 @@ export default class LivePresencePlugin extends Plugin {
     this.registerInterval(window.setInterval(() => void this.heartbeat(), 5000));
     // Pick up a newly required version even while Obsidian keeps running.
     this.registerInterval(window.setInterval(() => void this.enforceVersion(), 60000));
+    // An Excalidraw view becomes usable asynchronously and fires no workspace
+    // event when it does, so the drawing session is re-evaluated periodically.
+    this.registerInterval(window.setInterval(() => this.evaluateDrawingCoedit(), 2000));
   }
 
   onunload(): void {
     this.vaultSync?.stop();
     void this.binding.disengage();
+    void this.excalBinding.disengage();
     this.presence?.destroy();
   }
 
@@ -226,7 +245,76 @@ export default class LivePresencePlugin extends Plugin {
           (p) => this.vaultSync?.getBaseHash(p),
         );
       }
+    }, 150);
+  }
+
+  // Drawings are co-edited whenever co-editing is on: they need no separate
+  // switch, and the drawing room never touches note text.
+  private drawingCoeditEnabled(): boolean {
+    return this.settings.enableCoedit && !!this.settings.serverUrl && !!this.settings.authUser;
+  }
+
+  // Identity for the drawing room. Excalidraw derives a collaborator's cursor
+  // colour from the id, so it has to be the login name rather than the
+  // per-connection client id - otherwise everyone changes colour on reconnect.
+  private effectiveDrawingUser(): { id: string; name: string; color: string } {
+    const { name, color } = this.effectiveUser();
+    return { id: this.settings.authUser || name, name, color };
+  }
+
+  // Attach or detach the drawing session for whichever drawing is in front.
+  private evaluateDrawingCoedit(): void {
+    const stop = (): void => {
+      if (this.excalBinding.active) void this.endDrawingSession();
+    };
+    if (!this.drawingCoeditEnabled() || this.versionBlocked) {
+      stop();
+      return;
+    }
+    const view = activeDrawingView(this.app);
+    const path = view?.file?.path ?? null;
+    if (!view || !path) {
+      stop();
+      return;
+    }
+    if (this.excalBinding.active && this.excalBinding.path !== path) {
+      void this.endDrawingSession().then(() => this.evaluateDrawingCoedit());
+      return;
+    }
+    if (this.excalBinding.isActive(path) || this.drawingEngageTimer !== null) return;
+    if (!this.presence.isConnected()) return;
+    // A placeholder has no drawing in it yet; wait until it is downloaded.
+    if (this.vaultSync?.isStub(path)) return;
+
+    // Short delay: an Excalidraw view reports itself before its scene API is
+    // usable, and this also coalesces rapid tab switching.
+    this.drawingEngageTimer = window.setTimeout(() => {
+      this.drawingEngageTimer = null;
+      const v = activeDrawingView(this.app);
+      const p = v?.file?.path ?? null;
+      if (!v || p !== path || this.excalBinding.isActive(path)) return;
+      const host = createSceneHost(v);
+      if (!host) return; // this Excalidraw build does not expose what we need
+      void this.excalBinding.engage(
+        host,
+        path,
+        this.effectiveAuth(),
+        this.effectiveDrawingUser(),
+      );
     }, 300);
+  }
+
+  // End a drawing session cleanly: publish the last strokes, then refresh the
+  // at-rest copy so peers who never opened the drawing still get it.
+  private async endDrawingSession(): Promise<void> {
+    const path = this.excalBinding.path;
+    if (this.drawingEngageTimer !== null) {
+      window.clearTimeout(this.drawingEngageTimer);
+      this.drawingEngageTimer = null;
+    }
+    this.excalBinding.flush();
+    await this.excalBinding.disengage();
+    if (path) await this.vaultSync?.publishDrawingAtRest(path);
   }
 
   private effectiveUser(): { name: string; color: string } {
@@ -340,13 +428,14 @@ export default class LivePresencePlugin extends Plugin {
       this.app,
       this.settings.serverUrl,
       this.effectiveAuth(),
-      (path) => this.binding.isActive(path),
+      (path) => this.binding.isActive(path) || this.excalBinding.isActive(path),
       () => this.effectiveUser(),
       () => this.loadBaseHashes(),
       (record) => this.saveBaseHashes(record),
       (path, localText, remoteText) => this.notifyConflict(path, localText, remoteText),
       () => {}, // logging silenced for normal operation
       (path) => this.onNoteMaterialized(path),
+      () => this.drawingCoeditEnabled(),
     );
     void this.vaultSync.start();
   }
@@ -396,6 +485,7 @@ export default class LivePresencePlugin extends Plugin {
       this.vaultSync?.stop();
       this.vaultSync = null;
       void this.binding.disengage();
+      void this.excalBinding.disengage();
       this.presence?.destroy();
     }
     this.showUpdateModal(info);
@@ -642,7 +732,10 @@ export default class LivePresencePlugin extends Plugin {
       void this.binding.disengage();
     }
     this.activeCm = view ? (getCmView(view) ?? null) : null;
-    this.presence.setFile(activePath);
+    // With a drawing in front there is no MarkdownView, so without this the
+    // roster would show "no note open" while someone is drawing.
+    const drawingPath = activeDrawingView(this.app)?.file?.path ?? null;
+    this.presence.setFile(activePath ?? drawingPath);
     if (view && this.activeCm) {
       const sel = this.activeCm.state.selection.main;
       this.presence.setCursor({
@@ -656,6 +749,7 @@ export default class LivePresencePlugin extends Plugin {
     this.refreshRemoteCursors();
     this.refreshRosterVersions(); // the active note changed -> update the sidebar
     this.evaluateCoedit();
+    this.evaluateDrawingCoedit();
   }
 
   private refreshRosterVersions(): void {

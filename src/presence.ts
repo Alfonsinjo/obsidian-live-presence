@@ -16,7 +16,7 @@ export class PresenceConnection {
   // Coalesce change notifications so we do not redraw on every keystroke.
   private emitChange = debounce(() => {
     for (const cb of this.changeCbs) cb();
-  }, 100);
+  }, 60);
 
   constructor(
     private serverUrl: string,
