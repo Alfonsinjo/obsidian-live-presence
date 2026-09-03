@@ -313,8 +313,11 @@ export default class LivePresencePlugin extends Plugin {
       this.drawingEngageTimer = null;
     }
     this.excalBinding.flush();
+    // Only the last participant out refreshes the file's at-rest copy - see
+    // ExcalidrawBinding.peerCount for why concurrent writers are not acceptable.
+    const alone = this.excalBinding.peerCount() === 0;
     await this.excalBinding.disengage();
-    if (path) await this.vaultSync?.publishDrawingAtRest(path);
+    if (path && alone) await this.vaultSync?.publishDrawingAtRest(path);
   }
 
   private effectiveUser(): { name: string; color: string } {

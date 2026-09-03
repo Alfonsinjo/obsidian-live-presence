@@ -13,7 +13,15 @@ import {
 import { type ChangeEntry, listChangelog, reconstructBase } from "../changelog";
 import { logProblem } from "../logger";
 import { type MergeResult, mergeThreeWay } from "../merge";
+import { isDrawingFile } from "../collab/excalidraw-host";
 import { blobExists, downloadBlob, uploadBlob } from "./blobs";
+import {
+  onDrawingDisengage,
+  onDrawingIndexChange,
+  onDrawingReconcile,
+  onLocalDrawingChange,
+  type DrawingState,
+} from "./drawing-policy";
 
 interface Auth {
   user: string;
@@ -121,6 +129,11 @@ export class VaultSync {
     private log: (...args: unknown[]) => void,
     // Notified after a stub note has been downloaded, so co-editing can engage.
     private onMaterialized: (path: string) => void = () => {},
+    // Whether Excalidraw drawings are handled by the element-level drawing rooms.
+    // When they are, this class must keep its hands off their file contents (see
+    // drawing-policy.ts); when they are not, they stay ordinary text files so
+    // turning the feature off does not stop drawings from syncing at all.
+    private drawingCoedit: () => boolean = () => false,
   ) {}
 
   async start(): Promise<void> {
@@ -211,6 +224,38 @@ export class VaultSync {
       this.indexDoc = null;
     }
     this.files = null;
+  }
+
+  // A drawing whose scene travels through its own room rather than as file text.
+  private isLiveDrawing(path: string): boolean {
+    return this.drawingCoedit() && isDrawingFile(this.app, path);
+  }
+
+  private drawingState(path: string): DrawingState {
+    const entry = this.files?.get(path);
+    return {
+      existsLocally: this.app.vault.getAbstractFileByPath(path) instanceof TFile,
+      inIndex: entry != null,
+      tombstone: entry?.d === 1,
+      engaged: this.isCoEditing(path),
+    };
+  }
+
+  // Publish a drawing's file as-is, so peers who do not have it open (and new
+  // devices) still receive it. Never merged: the scene was already reconciled
+  // element by element, and a line merge of a compressed data block is fatal.
+  async publishDrawingAtRest(path: string): Promise<void> {
+    if (!this.running || !this.files) return;
+    if (onDrawingDisengage(this.drawingState(path)) !== "publish") return;
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    const content = normalizeLineEndings(await this.app.vault.read(file));
+    if (content.length === 0) return;
+    const hash = hashString(content);
+    if (this.localHashes.get(path) === hash) return;
+    await this.pushTextRaw(path, hash, content);
+    this.mtimes.set(path, file.stat.mtime);
+    this.log(`published drawing at rest ${path}`);
   }
 
   private kindOf(path: string): "t" | "b" {
@@ -389,6 +434,14 @@ export class VaultSync {
     if (this.stubs.has(path)) return;
     // A live co-editing session owns this file's document; leave it alone.
     if (this.isCoEditing(path)) return;
+    if (this.isLiveDrawing(path)) {
+      // Two clients holding the same scene still serialise it to different bytes,
+      // so the usual hash comparison would have them overwrite each other for ever.
+      if (onDrawingReconcile(this.drawingState(path)) === "publish") {
+        await this.publishDrawingAtRest(path);
+      }
+      return;
+    }
     const base = this.localHashes.get(path);
     const entry = this.files.get(path);
 
@@ -450,6 +503,15 @@ export class VaultSync {
     if (!this.running) return;
     if (this.stubs.has(path)) return; // a placeholder must never be pushed
     if (this.kindOf(path) === "t" && this.isCoEditing(path)) return;
+    if (this.isLiveDrawing(path)) {
+      // An Excalidraw autosave, which fires on a timer and on every blur. Its
+      // bytes differ from every peer's, so pushing here is the loop described in
+      // drawing-policy.ts. Only a drawing the index has never seen is published.
+      if (onLocalDrawingChange(this.drawingState(path)) === "publish") {
+        void this.publishDrawingAtRest(path);
+      }
+      return;
+    }
     let push = this.pushers.get(path);
     if (!push) {
       // Short debounce: coalesce rapid changes but propagate new files/edits
@@ -723,6 +785,14 @@ export class VaultSync {
         continue;
       }
       if (this.stubs.has(path)) continue; // still a placeholder; do not download
+      if (this.isLiveDrawing(path)) {
+        // The scene itself arrives through the drawing room; a differing byte
+        // hash here says nothing, so an existing local copy is left alone.
+        if (onDrawingIndexChange(this.drawingState(path)) === "fetch") {
+          void this.createStub(path);
+        }
+        continue;
+      }
       const local = this.app.vault.getAbstractFileByPath(path);
       if (!(local instanceof TFile)) {
         // New note on the server -> placeholder (downloaded when opened).
@@ -783,8 +853,11 @@ export class VaultSync {
     };
     const path = view?.file?.path;
     const type = view?.getViewType?.();
-    if (path && type && type !== "markdown" && this.kindOf(path) === "t") return path;
-    return null;
+    if (!path || !type || type === "markdown" || this.kindOf(path) !== "t") return null;
+    // A drawing handled element by element must not also be pushed as whole file
+    // text: that is the two-transport race that loses strokes.
+    if (this.isLiveDrawing(path)) return null;
+    return path;
   }
 
   private teardownLive(): void {

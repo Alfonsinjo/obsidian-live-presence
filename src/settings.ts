@@ -98,7 +98,9 @@ export class LivePresenceSettingTab extends PluginSettingTab {
       .setName("Co-Editing aktivieren")
       .setDesc(
         "Bearbeitet dieselbe Notiz zeichenweise in Echtzeit, sobald zwei oder mehr Personen sie geöffnet haben. " +
-          "Standardmäßig aus. Anwesenheit und Cursor funktionieren unabhängig davon.",
+          "Gilt auch für Excalidraw-Zeichnungen: dort wird die Zeichnung elementweise geteilt, " +
+          "fremde Zeiger und Auswahlen erscheinen direkt auf der Fläche. " +
+          "Anwesenheit und Cursor funktionieren unabhängig davon.",
       )
       .addToggle((tg) =>
         tg.setValue(this.plugin.settings.enableCoedit).onChange(async (v) => {

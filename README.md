@@ -24,8 +24,21 @@ Live Presence adds the missing awareness layer, consisting of a live roster and 
 * A presence roster: a status bar indicator and a sidebar panel that lists everyone currently online, grouped by the note they are in. Selecting a note opens it.
 * Live cursors and selections of other people inside the note you have open, each in a distinct colour with a name label.
 * Real-time co-editing: when two or more people open the same note, editing becomes character by character in real time, with correct remote cursors based on CRDT relative positions. It starts and stops automatically as people join and leave the note.
+* Real-time co-editing of Excalidraw drawings, if the Excalidraw plugin is installed. Two people can draw on the same canvas at once and see each other's pointers and selections on it.
 
 Presence and cursors are exchanged as metadata and never touch your files. During co-editing the note is edited through a shared CRDT (Yjs), so the plugin runs alongside a file-sync plugin (Self-hosted LiveSync, Syncthing, Git), which keeps the note stored and backed up as usual.
+
+### Excalidraw drawings
+
+A drawing is not shared as text. The body of an `.excalidraw.md` file is one machine-generated, usually LZ-compressed data block; merging that as text does not degrade a drawing, it destroys it, and replacing the whole file on every change means whoever saves last wins and the other person's strokes are gone.
+
+Instead the drawing's *scene* is shared, one entry per element, in a room of its own (`excal:<path>`, separate from the note's text room). Excalidraw elements carry their own version metadata, so each element is resolved individually: the higher version wins and ties are broken deterministically, which is the same rule Excalidraw itself uses for collaboration. The practical result is that two people drawing different shapes never conflict, two people moving the same shape converge on one of the two movements rather than an average of both, and a deletion travels as a tombstone so it cannot be undone by a peer that still has the shape.
+
+Three details matter in practice. An element the local user is dragging, resizing or typing into is never overwritten from the network, so nothing jumps out from under the pointer. A stroke that is still being drawn is not streamed; it is published once it is finished, which is orders of magnitude less traffic than sending every intermediate point. And incoming changes are applied without touching the local selection, viewport or undo history, so a colleague's edit never scrolls your canvas or lands in your undo stack.
+
+Remote pointers and selections are rendered through Excalidraw's own collaboration display, so they look the way they do on excalidraw.com.
+
+Limitations worth knowing: drawings get no author highlighting or history view (those are built on shared text); if several drawings are open side by side, only the one in front is co-edited; and because editing is not locked on the canvas the way it is in a note, an element deleted while disconnected can come back once when the connection returns.
 
 ## How it works
 
