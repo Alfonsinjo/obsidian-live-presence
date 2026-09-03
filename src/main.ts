@@ -545,16 +545,19 @@ export default class LivePresencePlugin extends Plugin {
       new Notice("Live Presence: Automatisches Update nicht möglich. Bitte über BRAT aktualisieren.");
       return;
     }
-    const base = `https://github.com/${UPDATE_REPO}/releases/download/${version}`;
+    // Prefer the relay (same server we are already talking to - always reachable
+    // on the campus network, no redirects); fall back to the GitHub release.
+    const relayBase = `${this.settings.serverUrl.replace(/^wss:/i, "https:").replace(/^ws:/i, "http:")}/plugin`;
+    const githubBase = `https://github.com/${UPDATE_REPO}/releases/download/${version}`;
     const files = ["manifest.json", "main.js", "styles.css"];
     const notice = new Notice("Live Presence: Lade Update …", 0);
     try {
       // Download everything first; only write once all files are in hand. Each
-      // file is retried a few times: the connection can briefly drop, and a
-      // single failed fetch must not abort the whole update.
+      // file is retried a few times over both sources: the connection can briefly
+      // drop, and a single failed fetch must not abort the whole update.
       const contents: Record<string, string> = {};
       for (const f of files) {
-        contents[f] = await this.fetchUpdateFile(`${base}/${f}`, f);
+        contents[f] = await this.fetchUpdateFile([`${relayBase}/${f}`, `${githubBase}/${f}`], f);
       }
       for (const f of files) {
         await this.app.vault.adapter.write(`${dir}/${f}`, contents[f]);
@@ -569,32 +572,35 @@ export default class LivePresencePlugin extends Plugin {
     }
   }
 
-  // Fetch one release file, retrying on a failed or empty response. Falls back
-  // to the array-buffer body when the text body comes back empty (can happen on
-  // some redirected responses).
-  private async fetchUpdateFile(url: string, name: string): Promise<string> {
+  // Fetch one release file, trying each source URL in turn and retrying a few
+  // times: the connection can briefly drop mid-download. Falls back to the
+  // array-buffer body when the text body comes back empty (can happen on some
+  // redirected responses).
+  private async fetchUpdateFile(urls: string[], name: string): Promise<string> {
     let lastErr = "";
-    for (let attempt = 1; attempt <= 4; attempt++) {
-      try {
-        // Race against a timeout: requestUrl has no timeout of its own and can
-        // hang indefinitely if the connection stalls mid-download.
-        const res = await Promise.race([
-          requestUrl({ url, method: "GET", throw: false }),
-          new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Zeitüberschreitung")), 12000)),
-        ]);
-        if (res.status !== 200) {
-          lastErr = `${name}: HTTP ${res.status}`;
-        } else if (typeof res.text === "string" && res.text.length > 0) {
-          return res.text;
-        } else if (res.arrayBuffer && res.arrayBuffer.byteLength > 0) {
-          return new TextDecoder().decode(res.arrayBuffer);
-        } else {
-          lastErr = `${name}: leere Antwort`;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      for (const url of urls) {
+        try {
+          // Race against a timeout: requestUrl has no timeout of its own and can
+          // hang indefinitely if the connection stalls mid-download.
+          const res = await Promise.race([
+            requestUrl({ url, method: "GET", throw: false }),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error("Zeitüberschreitung")), 12000)),
+          ]);
+          if (res.status !== 200) {
+            lastErr = `${name}: HTTP ${res.status}`;
+          } else if (typeof res.text === "string" && res.text.length > 0) {
+            return res.text;
+          } else if (res.arrayBuffer && res.arrayBuffer.byteLength > 0) {
+            return new TextDecoder().decode(res.arrayBuffer);
+          } else {
+            lastErr = `${name}: leere Antwort`;
+          }
+        } catch (e) {
+          lastErr = `${name}: ${String(e)}`;
         }
-      } catch (e) {
-        lastErr = `${name}: ${String(e)}`;
       }
-      if (attempt < 4) await new Promise((r) => setTimeout(r, 600 * attempt));
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 600 * attempt));
     }
     throw new Error(lastErr || `${name}: fehlgeschlagen`);
   }
