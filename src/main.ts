@@ -1,5 +1,5 @@
 import { EditorView } from "@codemirror/view";
-import { MarkdownView, Notice, Plugin, type WorkspaceLeaf } from "obsidian";
+import { MarkdownView, Notice, Plugin, type WorkspaceLeaf, requestUrl } from "obsidian";
 import { listChangelog } from "./changelog";
 import { CollabBinding } from "./collab/binding";
 import { ConflictModal } from "./conflict-modal";
@@ -19,6 +19,9 @@ import { LivePresenceSettingTab } from "./settings";
 import { VaultSync } from "./sync/vault-sync";
 import { DEFAULT_SETTINGS, type LivePresenceSettings } from "./types";
 import { colorFromName, debounce, withAlpha } from "./utils";
+
+// Release source for the in-place self-update (same repository BRAT installs from).
+const UPDATE_REPO = "Alfonsinjo/obsidian-live-presence";
 
 // Obsidian exposes the underlying CodeMirror 6 view as editor.cm (undocumented but stable).
 function getCmView(view: MarkdownView): EditorView | undefined {
@@ -395,11 +398,46 @@ export default class LivePresencePlugin extends Plugin {
       this.app,
       this.manifest.version,
       info.latest,
+      () => void this.performSelfUpdate(info.latest),
       () => void this.enforceVersion(),
       () => {
         this.updateModalOpen = false;
       },
     ).open();
+  }
+
+  // Update in place without BRAT: fetch the release files, write them into this
+  // plugin's folder, then reload Obsidian so the new version takes effect.
+  private async performSelfUpdate(version: string): Promise<void> {
+    const dir = this.manifest.dir;
+    if (!dir) {
+      new Notice("Live Presence: Automatisches Update nicht möglich. Bitte über BRAT aktualisieren.");
+      return;
+    }
+    const base = `https://github.com/${UPDATE_REPO}/releases/download/${version}`;
+    const files = ["manifest.json", "main.js", "styles.css"];
+    const notice = new Notice("Live Presence: Lade Update …", 0);
+    try {
+      // Download everything first; only write once all files are in hand.
+      const contents: Record<string, string> = {};
+      for (const f of files) {
+        const res = await requestUrl({ url: `${base}/${f}`, method: "GET", throw: false });
+        if (res.status !== 200 || typeof res.text !== "string" || res.text.length === 0) {
+          throw new Error(`${f}: HTTP ${res.status}`);
+        }
+        contents[f] = res.text;
+      }
+      for (const f of files) {
+        await this.app.vault.adapter.write(`${dir}/${f}`, contents[f]);
+      }
+      logProblem("info", "Self-Update geladen", { version });
+      notice.setMessage("Live Presence: Aktualisiert. Obsidian wird neu geladen …");
+      window.setTimeout(() => window.location.reload(), 900);
+    } catch (err) {
+      logProblem("error", "Self-Update fehlgeschlagen", { version, err: String(err) });
+      notice.setMessage("Live Presence: Update fehlgeschlagen. Bitte über BRAT aktualisieren.");
+      window.setTimeout(() => notice.hide(), 6000);
+    }
   }
 
   // Connectivity check. The network flag flips instantly when the network is

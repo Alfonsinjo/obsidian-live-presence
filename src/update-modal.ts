@@ -2,11 +2,13 @@ import { type App, Modal } from "obsidian";
 
 // Shown when the client is older than the version the server requires. Everyone
 // must run the same version, so the tool stays locked until the user updates.
+// Offers a one-click self-update; BRAT stays available as a fallback.
 export class UpdateModal extends Modal {
   constructor(
     app: App,
     private current: string,
     private latest: string,
+    private onUpdate: () => void,
     private onRecheck: () => void,
     private onClosed: () => void,
   ) {
@@ -24,21 +26,22 @@ export class UpdateModal extends Modal {
     });
     const v = contentEl.createEl("p");
     v.createEl("strong", { text: "Deine Version: " });
-    v.appendText(`${this.current}  •  `);
-    v.createEl("strong", { text: "Erforderlich: " });
+    v.appendText(`${this.current}  •  `);
+    v.createEl("strong", { text: "Neue Version: " });
     v.appendText(this.latest);
-
-    contentEl.createEl("p", { text: "So aktualisierst du:" });
-    const ol = contentEl.createEl("ol");
-    ol.createEl("li", { text: "Befehlspalette öffnen (Strg/Cmd + P)." });
-    ol.createEl("li", { text: "„BRAT: Check for updates to all beta plugins" + "\" ausführen." });
-    ol.createEl("li", { text: "Anschließend Obsidian neu laden (Knopf unten)." });
 
     const actions = contentEl.createDiv({ cls: "lp-conflict-actions" });
     actions
-      .createEl("button", { text: "Obsidian neu laden", cls: "mod-cta" })
-      .onClickEvent(() => window.location.reload());
+      .createEl("button", { text: "Jetzt aktualisieren", cls: "mod-cta" })
+      .onClickEvent(() => this.onUpdate());
     actions.createEl("button", { text: "Erneut prüfen" }).onClickEvent(() => this.onRecheck());
+
+    contentEl.createEl("p", {
+      cls: "lp-conflict-hint",
+      text:
+        "Jetzt aktualisieren lädt die neue Version direkt und startet Obsidian neu. " +
+        "Alternativ über BRAT: Befehlspalette, dann BRAT-Update ausführen und Obsidian neu laden.",
+    });
   }
 
   onClose(): void {
