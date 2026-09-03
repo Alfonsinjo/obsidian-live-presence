@@ -8,6 +8,7 @@ import { logProblem } from "../logger";
 import {
   applyMinimalCmUpdate,
   applyMinimalYTextUpdate,
+  claimSeed,
   hashString,
   normalizeLineEndings,
   registerAuthor,
@@ -111,21 +112,18 @@ export class CollabBinding {
       if (remote0 === local) {
         // Already identical: nothing to reconcile.
       } else if (remote0.length === 0 && local.length > 0) {
-        // Shared text is empty but we have content. Wait briefly for a peer to seed it,
-        // then adopt; otherwise seed from our own content. Never wipe the editor.
-        await sleep(400);
+        // Shared text is empty but we have content. Coordinate so only ONE
+        // client seeds it (two full inserts would be concatenated into a
+        // duplicate); a loser adopts whatever content arrives. Never wipe editor.
+        const iSeed = await claimSeed(doc);
         if (this.gen !== gen || this.destroyed(view)) return;
-        const self = provider.awareness.clientID;
-        const others = [...provider.awareness.getStates().keys()].filter((id) => id !== self);
-        const iSeed = others.length === 0 || self <= Math.min(...others);
-        if (!iSeed) {
-          for (let i = 0; i < 25 && text.length === 0; i++) {
-            await sleep(100);
-            if (this.gen !== gen || this.destroyed(view)) return;
-          }
+        if (iSeed) {
+          applyMinimalYTextUpdate(doc, text, local);
+        } else if (text.length > 0) {
+          applyMinimalCmUpdate(view, text.toString());
         }
-        if (text.length > 0) applyMinimalCmUpdate(view, text.toString());
-        else applyMinimalYTextUpdate(doc, text, local);
+        // else: still empty and we did not win the claim -> leave it; a later
+        // engage or reconcile seeds it once coordination succeeds.
       } else if (local.length === 0) {
         // Editor empty, shared has content -> adopt it.
         applyMinimalCmUpdate(view, remote0);

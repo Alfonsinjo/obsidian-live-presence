@@ -3,6 +3,7 @@ import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
 import {
   applyMinimalYTextUpdate,
+  claimSeed,
   debounce,
   hashBytes,
   hashString,
@@ -577,13 +578,26 @@ export class VaultSync {
       const remoteDiffersFromBase =
         baseHash === undefined ? hashString(remote) !== hash : hashString(remote) !== baseHash;
       const localDiffersFromBase = baseHash === undefined || hash !== baseHash;
-      if (remote.length > 0 && remoteDiffersFromBase && localDiffersFromBase) {
+      // Only a real conflict if the shared copy actually differs from ours. If
+      // remote === local (both merely advanced past a stale base) there is
+      // nothing to reconcile - do NOT prompt.
+      const remoteDiffersFromLocal = hashString(remote) !== hash;
+      if (remote.length > 0 && remoteDiffersFromLocal && remoteDiffersFromBase && localDiffersFromBase) {
         conflictRemote = remote; // resolved after the connection is closed
       } else {
         registerAuthor(doc, this.getUser());
-        this.seedIfEmpty(doc, provider, content);
+        // Coordinate seeding of an empty doc so two clients never both insert
+        // the full content (which Yjs would duplicate). For a non-empty doc the
+        // minimal diff already replaces safely.
+        if (text.length === 0) {
+          const iSeed = await claimSeed(doc);
+          if (!this.running) return false;
+          if (!iSeed && text.length === 0) return true; // lost the claim, nothing yet -> retry later
+          if (iSeed) applyMinimalYTextUpdate(doc, text, content);
+        } else {
+          applyMinimalYTextUpdate(doc, text, content);
+        }
         if (!this.running) return false;
-        applyMinimalYTextUpdate(doc, text, content);
         await sleep(600); // allow the update to reach and be persisted by the server
         this.files.set(path, { k: "t", h: hash, t: Date.now() });
         this.localHashes.set(path, hash);
@@ -616,9 +630,15 @@ export class VaultSync {
       if (!synced || !this.running) return false;
       registerAuthor(doc, this.getUser());
       const text = doc.getText("content");
-      this.seedIfEmpty(doc, provider, content);
+      if (text.length === 0) {
+        const iSeed = await claimSeed(doc);
+        if (!this.running) return false;
+        if (!iSeed && text.length === 0) return false; // lost the claim -> retry later
+        if (iSeed) applyMinimalYTextUpdate(doc, text, content);
+      } else {
+        applyMinimalYTextUpdate(doc, text, content);
+      }
       if (!this.running) return false;
-      applyMinimalYTextUpdate(doc, text, content);
       await sleep(600);
       this.files.set(path, { k: "t", h: hash, t: Date.now() });
       this.localHashes.set(path, hash);
@@ -629,26 +649,6 @@ export class VaultSync {
     } finally {
       provider.destroy();
       doc.destroy();
-    }
-  }
-
-  // Seeding an empty document: only one client should insert the full text,
-  // otherwise two concurrent seeds would duplicate content. Elect the lowest
-  // client id; the others wait briefly for the content to arrive.
-  private async seedIfEmpty(doc: Y.Doc, provider: WebsocketProvider, content: string): Promise<void> {
-    const text = doc.getText("content");
-    if (text.length !== 0 || content.length === 0) return;
-    provider.awareness.setLocalStateField("seed", true);
-    await sleep(500);
-    if (!this.running) return;
-    const self = doc.clientID;
-    const others = [...provider.awareness.getStates().keys()].filter((id) => id !== self);
-    const iSeed = others.length === 0 || self <= Math.min(...others);
-    if (!iSeed) {
-      for (let i = 0; i < 25 && text.length === 0; i++) {
-        await sleep(100);
-        if (!this.running) return;
-      }
     }
   }
 

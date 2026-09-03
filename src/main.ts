@@ -730,6 +730,9 @@ export default class LivePresencePlugin extends Plugin {
   private updateActiveContext(): void {
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     const activePath = view?.file?.path ?? null;
+    // Remember the last markdown note we were actually in, so the sidebar keeps
+    // showing it when a non-note view (its own button, the roster) takes focus.
+    if (activePath) this.lastMarkdownPath = activePath;
     // Co-editing follows a single file; leaving it ends the session.
     if (this.binding.active && this.binding.path !== activePath) {
       void this.binding.disengage();
@@ -815,15 +818,21 @@ export default class LivePresencePlugin extends Plugin {
 
   // Path of the current note (Markdown only), even when a sidebar has focus.
   private activePath(): string | null {
+    // Prefer the active markdown editor - reliable even when getActiveFile lags
+    // or returns null because a sidebar has focus.
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (view?.file?.extension === "md") {
+      this.lastMarkdownPath = view.file.path;
+      return view.file.path;
+    }
     const file = this.app.workspace.getActiveFile();
     if (file && file.extension === "md") {
       this.lastMarkdownPath = file.path;
       return file.path;
     }
-    // The sidebar (or another non-note view) is focused: keep showing the last
-    // opened note as long as it is still open somewhere.
+    // A sidebar (or another non-note view) is focused: keep showing the last
+    // opened note as long as it is still open in some tab.
     if (this.lastMarkdownPath && this.isPathOpen(this.lastMarkdownPath)) return this.lastMarkdownPath;
-    this.lastMarkdownPath = null;
     return null;
   }
 

@@ -19,6 +19,30 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Coordinate seeding of an empty shared document so two clients never both
+// insert the full content (Yjs would concatenate the two inserts into a
+// duplicated note). Ownership is claimed via a converged Yjs map key, so all
+// clients agree on a single owner. Returns true ONLY for that owner; a loser
+// never inserts - it waits for the owner's content, which the caller then
+// adopts. This replaces the old awareness+timeout election whose "insert anyway"
+// fallback caused duplication when the two seeders' windows did not align.
+export async function claimSeed(doc: Y.Doc): Promise<boolean> {
+  const text = doc.getText("content");
+  if (text.length > 0) return false; // already seeded
+  const meta = doc.getMap("meta");
+  doc.transact(() => {
+    if (!meta.has("seedOwner")) meta.set("seedOwner", doc.clientID);
+  });
+  await sleep(800); // let the ownership claim (and any content) converge
+  if (text.length > 0) return false; // someone already seeded -> adopt it
+  if (meta.get("seedOwner") !== doc.clientID) {
+    // Not the owner: wait for the owner's content so the caller can adopt it.
+    for (let i = 0; i < 40 && text.length === 0; i++) await sleep(100);
+    return false;
+  }
+  return true; // we own the seed -> the caller inserts the content
+}
+
 function hslToHex(h: number, s: number, l: number): string {
   const sN = s / 100;
   const lN = l / 100;
