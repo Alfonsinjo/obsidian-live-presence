@@ -1,4 +1,4 @@
-import { type App, type EventRef, TFile, normalizePath } from "obsidian";
+import { type App, type EventRef, Notice, TFile, normalizePath } from "obsidian";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
 import {
@@ -34,6 +34,21 @@ interface IndexEntry {
 const INDEX_ROOM = "vault-index";
 const SYNC_TIMEOUT = 8000;
 const RECONCILE_INTERVAL = 60000;
+
+// On-demand loading: notes that exist on the server but not yet on this device
+// are created as small placeholder ("stub") files so the vault tree is complete,
+// and their real content is fetched only when the note is opened. The marker
+// identifies a stub on disk; it must NEVER be pushed to the server.
+const STUB_MARKER = "<!-- live-presence-stub -->";
+function stubContent(path: string): string {
+  const name = path.replace(/\.md$/i, "").split("/").pop() ?? path;
+  return (
+    `# ${name}\n\n` +
+    "> [!info] Noch nicht geladen\n" +
+    "> Diese Notiz liegt noch nicht auf diesem Gerät. Sie wird beim Öffnen automatisch vom Server geladen.\n\n" +
+    `${STUB_MARKER}\n`
+  );
+}
 
 const MIME: Record<string, string> = {
   pdf: "application/pdf",
@@ -75,6 +90,9 @@ export class VaultSync {
   private pendingWrites = new Map<string, string>();
   private pushers = new Map<string, (path: string) => void>();
   private conflictsInProgress = new Set<string>();
+  // Placeholder notes not yet downloaded. Never pushed; skipped by reconcile.
+  private stubs = new Set<string>();
+  private materializing = new Set<string>();
 
   private reconcileRunning = false;
   private reconcileTimer: number | null = null;
@@ -100,6 +118,8 @@ export class VaultSync {
     private saveBaseHashes: (record: Record<string, string>) => void,
     private onConflict: (path: string, result: MergeResult) => Promise<"mine" | "theirs">,
     private log: (...args: unknown[]) => void,
+    // Notified after a stub note has been downloaded, so co-editing can engage.
+    private onMaterialized: (path: string) => void = () => {},
   ) {}
 
   async start(): Promise<void> {
@@ -126,8 +146,10 @@ export class VaultSync {
     if (!this.running) return;
     this.log(`index synced=${synced}, entries=${this.files.size}`);
 
-    await this.reconcilePass(); // initial bootstrap and push of local files
+    await this.rebuildStubs(); // recognise placeholder notes left from a prior session
+    await this.reconcilePass(); // initial bootstrap (stubs for remote-only notes)
     if (!this.running) return;
+    void this.materializeActive(); // download whatever note is already open
 
     this.files.observe((e) => this.onIndexChange(e));
     this.eventRefs.push(
@@ -147,6 +169,7 @@ export class VaultSync {
     this.leafRef = this.app.workspace.on("active-leaf-change", () => {
       this.flushPending();
       void this.syncLiveDoc();
+      void this.materializeActive();
     });
     this.indexProvider.on("status", (e: { status: string }) => {
       if (e.status === "connected") this.scheduleReconcile();
@@ -211,6 +234,106 @@ export class VaultSync {
     return this.localHashes.get(path);
   }
 
+  // Whether a path is currently a placeholder that has not been downloaded yet.
+  isStub(path: string): boolean {
+    return this.stubs.has(path);
+  }
+
+  // Rebuild the placeholder set from disk after a restart. Only small text files
+  // can be stubs, so larger files are skipped without being read.
+  private async rebuildStubs(): Promise<void> {
+    this.stubs.clear();
+    for (const file of this.app.vault.getFiles()) {
+      if (!this.running) return;
+      if (this.kindOf(file.path) !== "t" || file.stat.size > 1024) continue;
+      try {
+        if ((await this.app.vault.read(file)).includes(STUB_MARKER)) this.stubs.add(file.path);
+      } catch {
+        // unreadable; ignore
+      }
+    }
+  }
+
+  // Create a placeholder for a note that only exists on the server. It is added
+  // to the stub set BEFORE the file is written so the resulting create event is
+  // not pushed back to the server.
+  private async createStub(path: string): Promise<void> {
+    if (this.stubs.has(path) || this.app.vault.getAbstractFileByPath(path)) return;
+    this.stubs.add(path);
+    try {
+      await this.ensureFolder(path);
+      await this.app.vault.create(path, stubContent(path));
+      const f = this.app.vault.getAbstractFileByPath(path);
+      if (f instanceof TFile) this.mtimes.set(path, f.stat.mtime);
+      this.log(`stub ${path}`);
+    } catch {
+      this.stubs.delete(path);
+    }
+  }
+
+  // Download the active note's real content if it is still a placeholder.
+  private async materializeActive(): Promise<void> {
+    const path = this.app.workspace.getActiveFile()?.path;
+    if (path && this.stubs.has(path)) await this.materialize(path);
+  }
+
+  // Fetch a placeholder note's real content (and the attachments it embeds) from
+  // the server and replace the placeholder. A connection is required.
+  private async materialize(path: string): Promise<void> {
+    if (!this.running || !this.stubs.has(path) || this.materializing.has(path)) return;
+    this.materializing.add(path);
+    const name = path.replace(/\.md$/i, "").split("/").pop() ?? path;
+    const notice = new Notice(`Lade „${name}" …`, 0);
+    try {
+      const content = await this.readText(path);
+      // Keep the placeholder if we got nothing back: dropping it here without
+      // writing real content would let the placeholder be pushed to the server.
+      if (content === null || content.length === 0) {
+        notice.setMessage(`„${name}" konnte nicht geladen werden. Besteht eine Verbindung?`);
+        window.setTimeout(() => notice.hide(), 5000);
+        return;
+      }
+      this.stubs.delete(path); // real content is about to replace the placeholder
+      await this.writeText(path, content);
+      await this.materializeAttachments(content);
+      notice.hide();
+      this.log(`materialised ${path} (${content.length} chars)`);
+      this.onMaterialized(path);
+    } catch (err) {
+      this.stubs.add(path);
+      notice.setMessage(`„${name}" konnte nicht geladen werden.`);
+      window.setTimeout(() => notice.hide(), 5000);
+      this.log(`materialise failed for ${path}:`, err);
+    } finally {
+      this.materializing.delete(path);
+    }
+  }
+
+  // Download the binary attachments a note embeds/links, so images and PDFs
+  // appear as soon as the note is opened.
+  private async materializeAttachments(content: string): Promise<void> {
+    if (!this.files) return;
+    const refs = new Set<string>();
+    for (const m of content.matchAll(/!\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]/g)) refs.add(m[1].trim());
+    for (const m of content.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)) {
+      refs.add(decodeURIComponent(m[1].split(/[#?]/)[0].trim()));
+    }
+    if (refs.size === 0) return;
+    const wantBase = new Set<string>();
+    const wantPath = new Set<string>();
+    for (const r of refs) {
+      wantPath.add(r.toLowerCase());
+      wantBase.add((r.split("/").pop() ?? r).toLowerCase());
+    }
+    for (const [p, entry] of this.files.entries()) {
+      if (!this.running) return;
+      if (!entry || entry.d || this.kindOf(p) !== "b") continue;
+      if (this.app.vault.getAbstractFileByPath(p)) continue; // already local
+      const base = (p.split("/").pop() ?? p).toLowerCase();
+      if (wantBase.has(base) || wantPath.has(p.toLowerCase())) await this.pullBinary(p, entry.h);
+    }
+  }
+
   private async localHash(file: TFile): Promise<string> {
     if (this.kindOf(file.path) === "t") {
       return hashString(normalizeLineEndings(await this.app.vault.read(file)));
@@ -244,7 +367,11 @@ export class VaultSync {
         if (!this.running) return;
         const entry = this.files.get(path);
         if (!entry || entry.d) continue;
-        if (!localPaths.has(path)) await this.pull(path, entry);
+        if (localPaths.has(path)) continue;
+        // On-demand: notes get a placeholder and are downloaded when opened.
+        // Binaries have no placeholder; they are fetched with the note that
+        // embeds them.
+        if (this.kindOf(path) === "t") await this.createStub(path);
       }
       this.saveBase();
     } finally {
@@ -255,6 +382,8 @@ export class VaultSync {
   private async reconcileFile(file: TFile): Promise<void> {
     if (!this.files) return;
     const path = file.path;
+    // A placeholder note is not real content: never push or merge it.
+    if (this.stubs.has(path)) return;
     // A live co-editing session owns this file's document; leave it alone.
     if (this.isCoEditing(path)) return;
     const base = this.localHashes.get(path);
@@ -344,6 +473,7 @@ export class VaultSync {
 
   private onLocalChange(path: string): void {
     if (!this.running) return;
+    if (this.stubs.has(path)) return; // a placeholder must never be pushed
     if (this.kindOf(path) === "t" && this.isCoEditing(path)) return;
     let push = this.pushers.get(path);
     if (!push) {
@@ -613,9 +743,17 @@ export class VaultSync {
       if (!entry) continue;
       if (entry.d) {
         void this.applyRemoteDelete(path);
-      } else if (this.localHashes.get(path) !== entry.h) {
-        void this.pull(path, entry);
+        continue;
       }
+      if (this.stubs.has(path)) continue; // still a placeholder; do not download
+      const local = this.app.vault.getAbstractFileByPath(path);
+      if (!(local instanceof TFile)) {
+        // New note on the server -> placeholder (downloaded when opened).
+        // Binaries are fetched with the note that embeds them.
+        if (this.kindOf(path) === "t") void this.createStub(path);
+        continue;
+      }
+      if (this.localHashes.get(path) !== entry.h) void this.pull(path, entry);
     }
   }
 
@@ -631,6 +769,15 @@ export class VaultSync {
 
   private onLocalDelete(path: string): void {
     if (!this.running || !this.files) return;
+    // Deleting a placeholder only removes the local copy; the note stays on the
+    // server (it was never really here). Do not tombstone it.
+    if (this.stubs.has(path)) {
+      this.stubs.delete(path);
+      this.localHashes.delete(path);
+      this.mtimes.delete(path);
+      this.log(`removed stub ${path}`);
+      return;
+    }
     this.files.set(path, { k: this.kindOf(path), h: "", t: Date.now(), d: 1 });
     this.localHashes.delete(path);
     this.mtimes.delete(path);

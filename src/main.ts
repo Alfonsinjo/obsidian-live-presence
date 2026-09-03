@@ -170,12 +170,22 @@ export default class LivePresencePlugin extends Plugin {
     // a bound note that goes offline is kept alive by the reconnect merge.
     if (this.binding.isActive(file) || this.coeditEngageTimer !== null) return;
     if (!this.presence.isConnected()) return;
+    // A placeholder note has no real content yet; wait until it is downloaded
+    // (onNoteMaterialized re-runs this), otherwise the placeholder would sync.
+    if (this.vaultSync?.isStub(file)) return;
     this.coeditEngageTimer = window.setTimeout(() => {
       this.coeditEngageTimer = null;
       const v = this.app.workspace.getActiveViewOfType(MarkdownView);
       const c = v ? getCmView(v) : undefined;
       const f = v?.file?.path ?? null;
-      if (f === file && c && v && !this.isExcalidraw(v) && !this.binding.isActive(f)) {
+      if (
+        f === file &&
+        c &&
+        v &&
+        !this.isExcalidraw(v) &&
+        !this.binding.isActive(f) &&
+        !this.vaultSync?.isStub(f)
+      ) {
         void this.binding.engage(
           c,
           f,
@@ -294,6 +304,7 @@ export default class LivePresencePlugin extends Plugin {
       (record) => this.saveBaseHashes(record),
       (path, result) => this.resolveConflict(path, result),
       () => {}, // logging silenced for normal operation
+      (path) => this.onNoteMaterialized(path),
     );
     void this.vaultSync.start();
   }
@@ -323,6 +334,12 @@ export default class LivePresencePlugin extends Plugin {
         }
       }
     });
+  }
+
+  // A placeholder note just finished downloading: start co-editing if it is the
+  // active note (it was skipped while it was still a stub).
+  private onNoteMaterialized(path: string): void {
+    if (this.app.workspace.getActiveFile()?.path === path) this.evaluateCoedit();
   }
 
   // Ask the user which side to keep for an overlapping (same-line) change.

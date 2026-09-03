@@ -113,7 +113,9 @@ export class LivePresenceSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Ganzen Vault über den Relay synchronisieren")
       .setDesc(
-        "Verteilt alle Markdown-Notizen über den eigenen Server (Ersatz für externe Synchronisation). " +
+        "Verteilt den Vault über den eigenen Server (Ersatz für externe Synchronisation). " +
+          "Notizen werden bei Bedarf geladen: es erscheinen zunächst Platzhalter, der Inhalt wird erst " +
+          "beim Öffnen einer Notiz heruntergeladen (eingebundene Bilder/PDFs kommen mit). " +
           "Experimentell: nur mit Testdaten verwenden. Nach dem Umschalten Obsidian neu laden.",
       )
       .addToggle((tg) =>
