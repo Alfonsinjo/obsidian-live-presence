@@ -402,31 +402,14 @@ export default class LivePresencePlugin extends Plugin {
     ).open();
   }
 
-  // Fast connectivity check: the network flag is instant, and a short reachability
-  // probe catches a dead server well before the WebSocket notices. We only count
-  // as online when the network is up, the server answers, and the socket is up.
-  private async heartbeat(): Promise<void> {
+  // Connectivity check. The network flag flips instantly when the network is
+  // gone, and the WebSocket's own connected flag reflects the live link to the
+  // server. We deliberately do not add an HTTP probe: a cross-origin fetch is
+  // unreliable inside Obsidian and would falsely report offline while connected.
+  private heartbeat(): void {
     if (!this.settings.serverUrl || !this.settings.authUser) return;
-    if (!navigator.onLine) {
-      this.setOffline(true);
-      return;
-    }
-    const reachable = await this.probeServer();
-    this.setOffline(!(reachable && (this.presence?.isConnected() ?? false)));
-  }
-
-  private async probeServer(): Promise<boolean> {
-    const url = `${this.settings.serverUrl.replace(/^wss:/i, "https:").replace(/^ws:/i, "http:")}/healthz`;
-    try {
-      const ctrl = new AbortController();
-      const t = window.setTimeout(() => ctrl.abort(), 3000);
-      // no-cors: we only need to know the relay answers, not read the body.
-      await fetch(url, { mode: "no-cors", cache: "no-store", signal: ctrl.signal });
-      window.clearTimeout(t);
-      return true;
-    } catch {
-      return false;
-    }
+    const online = navigator.onLine && (this.presence?.isConnected() ?? false);
+    this.setOffline(!online);
   }
 
   // Central driver for the offline state: locks editing and shows/hides the
