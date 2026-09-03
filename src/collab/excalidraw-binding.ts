@@ -160,6 +160,16 @@ export class ExcalidrawBinding {
   // work - never to decide that publishing can be skipped for correctness, which
   // is a mistake that loses a joining peer's own elements.
   private publishedFingerprint = "";
+  // Shapes we have streamed while they were still being drawn. Needed so an
+  // abandoned gesture can be withdrawn again (see publishLocalChanges).
+  private inFlight = new Set<string>();
+  // Ids we have seen in the shared map. An id that was in there and is gone was
+  // withdrawn by its author, which is the one case where an element leaves a
+  // scene without a tombstone.
+  private knownShared = new Set<string>();
+  // Streamed shapes that have since vanished from the local scene, waiting to be
+  // retracted from the room. Recorded the moment they vanish - see noteAbandoned.
+  private pendingRetract = new Set<string>();
   // Last pointer/selection we broadcast, to avoid pointless awareness churn.
   private lastPointerKey = "";
   private lastCollabRender = 0;
@@ -226,6 +236,7 @@ export class ExcalidrawBinding {
     // Outgoing changes, coalesced.
     this.unsubscribeScene = host.onSceneChange(() => {
       if (this.applying) return;
+      this.noteAbandoned();
       this.dirty = true;
     });
     this.publishTimer = setInterval(() => this.tick(), PUBLISH_INTERVAL_MS);
@@ -258,6 +269,9 @@ export class ExcalidrawBinding {
     this.publishedFingerprint = "";
     this.lastPointerKey = "";
     this.lastCollabKey = "";
+    this.inFlight.clear();
+    this.knownShared.clear();
+    this.pendingRetract.clear();
 
     if (this.publishTimer !== null) clearInterval(this.publishTimer);
     if (this.pointerTimer !== null) clearInterval(this.pointerTimer);
@@ -310,12 +324,62 @@ export class ExcalidrawBinding {
   // "nothing changed" for an already-merged scene, so an idle drawing costs one
   // array walk per tick and produces no traffic.
   private tick(): void {
+    // Retract before merging. The other way round, reconciliation would adopt the
+    // abandoned shape back out of the room first, and it would then look like a
+    // perfectly normal local element that nobody wants.
+    this.retractAbandoned();
     this.mergeFromShared();
     if (this.dirty) {
       this.dirty = false;
       this.publishLocalChanges();
     }
     this.sweepTombstones();
+  }
+
+  // Notice, at the moment it happens, that a shape we streamed has left the local
+  // scene. Excalidraw removes an abandoned gesture (drawing a shape and pressing
+  // Escape) outright, with no tombstone, so this is the only point at which the
+  // difference between "the user gave up on it" and "it is simply not ours" is
+  // still visible. Recording it here rather than in the publish pass matters
+  // because a merge in between would have adopted it back from the room.
+  private noteAbandoned(): void {
+    const host = this.host;
+    if (!host || this.inFlight.size === 0) return;
+    const present = new Set(host.getElements().map((el) => el.id));
+    for (const id of this.inFlight) {
+      if (present.has(id)) continue;
+      this.inFlight.delete(id);
+      this.pendingRetract.add(id);
+    }
+  }
+
+  // Mark abandoned shapes deleted in the room. A tombstone rather than a removed
+  // entry: it carries the highest version, so it cannot be overruled by a peer
+  // that still holds the shape, and it travels the same path as every other
+  // deletion, including the sweep that eventually clears it.
+  private retractAbandoned(): void {
+    const shared = this.elements;
+    const conn = this.conn;
+    if (!shared || !conn || this.pendingRetract.size === 0) return;
+
+    const tombstones: ExcalElement[] = [];
+    for (const id of this.pendingRetract) {
+      const known = shared.get(id);
+      if (known && known.isDeleted !== true) {
+        tombstones.push({
+          ...known,
+          isDeleted: true,
+          version: known.version + 1,
+          versionNonce: Math.floor(Math.random() * 2 ** 31),
+          updated: Date.now(),
+        });
+      }
+    }
+    this.pendingRetract.clear();
+    if (tombstones.length === 0) return;
+    conn.doc.transact(() => {
+      for (const el of tombstones) shared.set(el.id, el);
+    }, LOCAL_ORIGIN);
   }
 
   // Take everything from the shared map that is newer than our copy.
@@ -325,23 +389,47 @@ export class ExcalidrawBinding {
     if (!host || !shared || this.applying) return;
 
     const remote: ExcalElement[] = [];
+    const remoteIds = new Set<string>();
     // Copies: the stored objects belong to the shared document, and Excalidraw
     // mutates scene elements in place. Handing it our stored value would corrupt
     // the room's own state.
-    shared.forEach((el) => remote.push({ ...el }));
-    if (remote.length === 0) return;
+    shared.forEach((el, id) => {
+      remoteIds.add(id);
+      // A shape we are about to retract must not be adopted back in the meantime.
+      if (this.pendingRetract.has(id) && el.isDeleted !== true) return;
+      remote.push({ ...el });
+    });
 
     const local = host.getElements();
+
+    // Withdrawals: an id that was in the shared map and no longer is. That
+    // happens when its author abandons a gesture mid-draw (Escape while drawing
+    // a shape), and when an expired tombstone is swept. Reconciliation merges
+    // what the room has and never removes, so this is handled here.
+    const withdrawn = new Set<string>();
+    for (const el of local) {
+      if (this.knownShared.has(el.id) && !remoteIds.has(el.id)) withdrawn.add(el.id);
+    }
+    this.knownShared = remoteIds;
+    if (remote.length === 0 && withdrawn.size === 0) return;
+
     const { elements, changed } = reconcileElements(local, remote, host.getGuard());
-    if (!changed) return;
+    if (!changed && withdrawn.size === 0) return;
+
+    const next = withdrawn.size === 0 ? elements : elements.filter((el) => !withdrawn.has(el.id));
 
     this.applying = true;
     try {
-      host.applyElements(elements);
+      host.applyElements(next);
       host.markDirty();
     } finally {
       this.applying = false;
     }
+    // Deliberately NOT setting publishedFingerprint here. It looks harmless -
+    // what we applied came from the room - but the merged scene also contains our
+    // own elements, and if one of those was still unpublished the next publish
+    // pass would skip it as "already in sync" and it would never leave. Only a
+    // completed publish pass may set that field.
     // Ask for one publish pass afterwards. It normally finds nothing (what we
     // merged came from the room), but it is the safety net that re-asserts a
     // local element the room turns out not to have.
@@ -360,20 +448,27 @@ export class ExcalidrawBinding {
     const fingerprint = sceneFingerprint(local);
     if (!force && fingerprint === this.publishedFingerprint) return;
 
-    // An unfinished stroke is deliberately not streamed. A single 300-point
-    // freehand stroke published point by point produces roughly a megabyte of
-    // updates; published once when the pointer is released it is a few kilobytes,
-    // and nobody misses the intermediate states of someone else's stroke. The
-    // release fires a change of its own, so the finished stroke goes out then.
+    // Unfinished shapes are published too, so a stroke grows on the other screen
+    // while it is being drawn rather than appearing only when the pointer is
+    // released. What keeps that affordable is the publish interval (a shape is
+    // sent at most 20 times a second, not once per pointer move) plus the fact
+    // that a shared-map entry is overwritten rather than appended, so the room's
+    // stored state does not grow with the intermediate versions - only the
+    // relay's update log does, and that is compacted periodically.
     const inProgress = new Set(host.getInProgressIds());
-    const publishable = inProgress.size === 0 ? local : local.filter((el) => !inProgress.has(el.id));
+    for (const id of inProgress) this.inFlight.add(id);
 
     const current = new Map<string, ExcalElement>();
     shared.forEach((el, id) => current.set(id, el));
-    const outgoing = elementsToPublish(publishable, current);
-    // Only claim to be in sync once nothing is being held back, otherwise the
-    // finished stroke would be skipped as "already published".
-    if (inProgress.size === 0) this.publishedFingerprint = fingerprint;
+    const outgoing = elementsToPublish(local, current);
+
+    // A finished shape is an ordinary element again; abandoning one is handled by
+    // noteAbandoned/retractAbandoned, which have to run earlier than this.
+    for (const id of this.inFlight) {
+      if (!inProgress.has(id)) this.inFlight.delete(id);
+    }
+
+    this.publishedFingerprint = fingerprint;
     if (outgoing.length === 0) return;
 
     conn.doc.transact(() => {

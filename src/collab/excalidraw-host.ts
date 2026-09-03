@@ -1,4 +1,5 @@
 import type { App, TFile, WorkspaceLeaf } from "obsidian";
+import { logProblem } from "../logger";
 import type { Collaborator, SceneHost } from "./excalidraw-binding";
 import type { ExcalElement, LocalGuardState } from "./excalidraw-reconcile";
 import { sceneFingerprint } from "./excalidraw-reconcile";
@@ -46,8 +47,9 @@ interface ExcalidrawViewLike {
 }
 
 // How often the scene is polled when the Excalidraw build offers no change
-// subscription at all. Only a fallback; the subscriptions are the normal path.
-const POLL_INTERVAL_MS = 150;
+// subscription. Only a fallback, and deliberately as fast as the publish
+// interval, because a slower poll would be visible as laggy drawing.
+const POLL_INTERVAL_MS = 50;
 
 // A drawing by path or by frontmatter, matching how the Excalidraw plugin itself
 // decides. Used to keep drawings out of the text-based sync paths even when no
@@ -184,18 +186,19 @@ export function createSceneHost(view: ExcalidrawViewLike): SceneHost | null {
       // onChange is the right source here even though it fires on every pointer
       // move: we throttle ourselves, and we *want* the intermediate positions -
       // they are what makes a shape appear to glide on the other screen instead
-      // of jumping only once the drag is released. Increments are the fallback,
-      // since they report committed changes only.
-      let subscribed = track(api.onChange, cb);
-      if (!subscribed && typeof api.onIncrement === "function") {
-        subscribed = track(api.onIncrement, (event) => {
-          if (event && event.type !== undefined && event.type !== "durable") return;
-          cb();
-        });
-      }
+      // of jumping only once the drag is released.
+      //
+      // Note what is NOT used as the fallback: onIncrement. Its "durable" events
+      // arrive when a change is committed, i.e. when the pointer is released,
+      // which would silently turn live drawing back into draw-then-appear.
+      // Polling is slightly wasteful but keeps the behaviour.
+      const subscribed = track(api.onChange, cb);
 
       if (!subscribed) {
-        // Last resort: watch the scene ourselves. Correct, just chattier.
+        logProblem("info", "Excalidraw: onChange nicht verfügbar, Szene wird abgefragt", {
+          hasOnIncrement: typeof api.onIncrement === "function",
+        });
+        // Watch the scene ourselves. Correct, just chattier.
         let last = sceneFingerprint(readAll.call(api));
         const timer = window.setInterval(() => {
           const now = sceneFingerprint(readAll.call(api));
