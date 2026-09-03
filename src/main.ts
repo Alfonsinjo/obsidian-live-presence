@@ -10,7 +10,7 @@ import { configureLogger, logProblem } from "./logger";
 import { UpdateModal } from "./update-modal";
 import { type VersionInfo, fetchRequiredVersion, isOutdated } from "./version";
 import { type DayInfo, type TimedRun, reconstructHistory } from "./history-blame";
-import { buildLiveBlame } from "./history-live";
+import { blameFromDoc, buildLiveBlame } from "./history-live";
 import { type OverlayRun, inlineOverlayExtension, setOverlay } from "./inline-overlay";
 import { NameModal } from "./name-modal";
 import { PresenceConnection } from "./presence";
@@ -322,9 +322,23 @@ export default class LivePresencePlugin extends Plugin {
     if (path) await this.vaultSync?.publishDrawingAtRest(path);
   }
 
-  private effectiveUser(): { name: string; color: string } {
+  private effectiveUser(): { name: string; color: string; login: string } {
     const name = this.displayName || this.settings.userName || "Anonym";
-    return { name, color: colorFromName(name) };
+    return { name, color: colorFromName(name), login: this.settings.authUser };
+  }
+
+  // Map login user -> current display name (from live presence + ourselves), so
+  // the blame view shows each author's up-to-date name even after a rename.
+  private currentAuthorNames(): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const e of this.presence?.getAll() ?? []) {
+      const login = (e.state as { login?: string }).login;
+      const name = e.state.user?.name;
+      if (login && name) map.set(login, name);
+    }
+    const me = this.effectiveUser();
+    if (me.login) map.set(me.login, me.name);
+    return map;
   }
 
   private effectiveAuth(): { user: string; pass: string } {
@@ -950,7 +964,13 @@ export default class LivePresencePlugin extends Plugin {
     // Author colouring: build it straight from the live document so it always
     // matches the current text (the change log can be stale or empty).
     if (dayFilter === undefined) {
-      const blame = await buildLiveBlame(this.settings.serverUrl, this.effectiveAuth(), path);
+      const names = this.currentAuthorNames();
+      // Reuse the already-open co-editing document if we have one - instant, no
+      // new connection; otherwise open a short-lived connection to read it.
+      const liveDoc = this.binding.liveDocFor(path);
+      const blame = liveDoc
+        ? blameFromDoc(liveDoc, names)
+        : await buildLiveBlame(this.settings.serverUrl, this.effectiveAuth(), path, names);
       const cm = this.activeCmView();
       if (!cm) return;
       if (!blame || blame.runs.length === 0) {

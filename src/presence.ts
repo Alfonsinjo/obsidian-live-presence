@@ -34,7 +34,7 @@ export class PresenceConnection {
       params: { u: this.auth.user, p: this.auth.pass },
     });
     this.awareness = this.provider.awareness;
-    this.setState({ user: this.user, file: null, cursor: null, ts: Date.now() });
+    this.setState({ user: this.user, login: this.auth.user, file: null, cursor: null, ts: Date.now() });
     this.awareness.on("change", this.emitChange);
     this.provider.on("status", (e: { status: string }) => {
       if (e.status === "connected") {
@@ -57,6 +57,7 @@ export class PresenceConnection {
     const cur =
       (this.awareness?.getLocalState() as unknown as PresenceState) ?? {
         user: this.user,
+        login: this.auth.user,
         file: null,
         cursor: null,
         ts: 0,

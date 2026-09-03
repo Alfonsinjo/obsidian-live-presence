@@ -39,6 +39,9 @@ export interface AwarenessUser {
 // What each client publishes via Yjs awareness.
 export interface PresenceState {
   user: AwarenessUser;
+  // Login user (stable across name changes); used to resolve authors to their
+  // current display name in the blame view.
+  login?: string;
   file: string | null;
   cursor: CursorState | null;
   ts: number;

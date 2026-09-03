@@ -23,6 +23,7 @@ interface Auth {
 interface User {
   name: string;
   color: string;
+  login?: string;
 }
 
 type ConflictResolver = (path: string, localText: string, remoteText: string) => Promise<void>;
@@ -50,6 +51,11 @@ export class CollabBinding {
 
   isActive(path: string): boolean {
     return this.provider !== null && this.path === path;
+  }
+  // The already-synced shared document for a note we are co-editing, so its
+  // author blame can be read instantly without opening a new connection.
+  liveDocFor(path: string): Y.Doc | null {
+    return this.isActive(path) ? this.doc : null;
   }
   get active(): boolean {
     return this.provider !== null;
