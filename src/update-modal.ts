@@ -21,8 +21,7 @@ export class UpdateModal extends Modal {
 
     contentEl.createEl("p", {
       text:
-        "Eine neue Version ist erforderlich, damit alle dieselbe verwenden. " +
-        "Die Bearbeitung ist bis zum Update pausiert.",
+        "Alle müssen dieselbe Version verwenden. Bis zum Update bleibt die Bearbeitung gesperrt.",
     });
     const v = contentEl.createEl("p");
     v.createEl("strong", { text: "Ihre Version: " });
@@ -38,7 +37,7 @@ export class UpdateModal extends Modal {
 
     contentEl.createEl("p", {
       cls: "lp-conflict-hint",
-      text: "Aktualisiert die App direkt und startet Obsidian neu.",
+      text: "Lädt die neue Version vom Server und startet Obsidian danach neu.",
     });
   }
 

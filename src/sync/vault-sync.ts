@@ -11,9 +11,7 @@ import {
   registerAuthor,
   sleep,
 } from "../utils";
-import { type ChangeEntry, listChangelog, reconstructBase } from "../changelog";
 import { logProblem } from "../logger";
-import { type MergeResult, mergeThreeWay } from "../merge";
 import { isDrawingFile } from "../collab/excalidraw-host";
 import { blobExists, downloadBlob, uploadBlob } from "./blobs";
 import {
@@ -350,14 +348,14 @@ export class VaultSync {
     if (!this.running || !this.stubs.has(path) || this.materializing.has(path)) return;
     this.materializing.add(path);
     const name = path.replace(/\.md$/i, "").split("/").pop() ?? path;
-    const notice = new Notice(`Lade „${name}" …`, 0);
+    const notice = new Notice(`Lade „${name}“ …`, 0);
     try {
       const content = await this.readText(path);
       // Keep the placeholder if we got nothing back: dropping it here without
       // writing real content would let the placeholder be pushed to the server.
       if (content === null || content.length === 0) {
         logProblem("warn", "Notiz laden fehlgeschlagen (leer/offline)", { path });
-        notice.setMessage(`„${name}" konnte nicht geladen werden. Besteht eine Verbindung?`);
+        notice.setMessage(`„${name}“ konnte nicht geladen werden. Besteht eine Verbindung zum Server?`);
         window.setTimeout(() => notice.hide(), 5000);
         return;
       }
@@ -370,7 +368,7 @@ export class VaultSync {
     } catch (err) {
       this.stubs.add(path);
       logProblem("error", "Notiz laden fehlgeschlagen", { path, err: String(err) });
-      notice.setMessage(`„${name}" konnte nicht geladen werden.`);
+      notice.setMessage(`„${name}“ konnte nicht geladen werden.`);
       window.setTimeout(() => notice.hide(), 5000);
       this.log(`materialise failed for ${path}:`, err);
     } finally {
@@ -490,10 +488,10 @@ export class VaultSync {
     }
 
     // Our copy changed since the last sync -> push it. For text, pushText
-    // detects when the shared copy also diverged and performs a three-way
-    // merge (never a blind overwrite), so neither side's text is lost. Only
-    // the shared copy changed -> pull (safe, our copy is untouched).
-    // Binary files have no line merge, so they keep last-writer-wins by mtime.
+    // detects when the shared copy also diverged and hands that case to
+    // resolveWithServerVersion (server wins, the user is shown the difference)
+    // instead of overwriting. Only the shared copy changed -> pull (safe, our
+    // copy is untouched). Binary files are last-writer-wins by mtime.
     if (current !== base) {
       const remoteChanged = !!entry && !entry.d && entry.h !== base && entry.h !== current;
       if (this.kindOf(path) === "b" && remoteChanged && entry && file.stat.mtime < entry.t) {
@@ -510,9 +508,8 @@ export class VaultSync {
   // notify the user (so they can copy their own text first), then mirror the
   // server version onto their disk. We never push the local text, which would
   // clobber the server, and we never merge.
-  private async mergeAndResolve(
+  private async resolveWithServerVersion(
     path: string,
-    _baseHash: string | undefined,
     local: string,
     remote: string,
   ): Promise<void> {
@@ -637,46 +634,9 @@ export class VaultSync {
       doc.destroy();
     }
     if (conflictRemote !== null) {
-      await this.mergeAndResolve(path, baseHash, content, conflictRemote);
+      await this.resolveWithServerVersion(path, content, conflictRemote);
     }
     return true;
-  }
-
-  // Push exactly this content to the shared copy with no conflict check. Used
-  // after a merge, where the content already contains the remote changes and
-  // re-diffing it against the shared copy would loop.
-  private async pushTextRaw(path: string, hash: string, content: string): Promise<boolean> {
-    if (!this.files) return false;
-    const doc = new Y.Doc();
-    const provider = new WebsocketProvider(this.serverUrl, this.roomFor(path), doc, {
-      connect: true,
-      params: { u: this.auth.user, p: this.auth.pass },
-    });
-    try {
-      const synced = await this.waitForSync(provider, SYNC_TIMEOUT);
-      if (!synced || !this.running) return false;
-      registerAuthor(doc, this.getUser());
-      const text = doc.getText("content");
-      if (text.length === 0) {
-        const iSeed = await claimSeed(doc);
-        if (!this.running) return false;
-        if (!iSeed && text.length === 0) return false; // lost the claim -> retry later
-        if (iSeed) applyMinimalYTextUpdate(doc, text, content);
-      } else {
-        applyMinimalYTextUpdate(doc, text, content);
-      }
-      if (!this.running) return false;
-      await sleep(600);
-      this.files.set(path, { k: "t", h: hash, t: Date.now() });
-      this.localHashes.set(path, hash);
-      this.baseText.set(path, content);
-      this.saveBase();
-      this.log(`pushed text ${path} (${content.length} chars, merged)`);
-      return true;
-    } finally {
-      provider.destroy();
-      doc.destroy();
-    }
   }
 
   private async pushBlob(path: string, hash: string): Promise<boolean> {

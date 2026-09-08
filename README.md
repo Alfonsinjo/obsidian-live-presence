@@ -1,94 +1,136 @@
 # Live Presence
 
-Live Presence shows who else is currently in your Obsidian vault, which note each person is working on, and the live cursors of others, in real time. It is fully self-hosted and connects to a server that you operate yourself, so no data leaves your network.
+Live Presence turns an Obsidian vault into a shared vault. Everyone connects to one WebSocket
+server that you run yourself. The plugin distributes the notes, shows who is currently online and
+which note each person is in, draws the other people's cursors, and lets two or more people type in
+the same note at the same time.
 
-Version: 0.1.0 (Phase 1)
+It does not need a second sync plugin. Self-hosted LiveSync, Syncthing or a Git remote are not
+involved any more: the vault travels over the same `wss://` connection that carries presence and
+cursors.
 
-Requires: Obsidian 1.5.0 or newer, desktop only.
+Requires Obsidian 1.5.0 or newer, desktop only. Licence: MIT.
 
-License: MIT
+The plugin interface is German. This file documents setup and operation in English.
 
-Note: The plugin user interface is currently in German. Setup and configuration are documented here in English.
+## What it does
 
-## Purpose
-
-Obsidian is local-first and designed for a single user. Teams that share a vault through a file synchronisation tool such as Self-hosted LiveSync, Syncthing, or Git can edit the same notes, but they work without awareness of one another. It is not visible that a colleague has opened the same note, changes appear only after the synchronisation delay, and there is no overview of who is currently active.
-
-Commercial and cloud-based tools such as Relay or Peerdraft provide this awareness, but they route data through external servers and usually require a subscription.
-
-Live Presence adds the missing awareness layer, consisting of a live roster and live cursors, while remaining fully self-hosted and free of charge. It runs alongside whatever file synchronisation you already use. In Phase 1 it exchanges only presence and cursor information and never writes to your files, so it cannot interfere with your synchronisation.
-
-## Features
-
-* Automatic connection when the vault is opened. No session needs to be started manually.
-* A presence roster: a status bar indicator and a sidebar panel that lists everyone currently online, grouped by the note they are in. Selecting a note opens it.
-* Live cursors and selections of other people inside the note you have open, each in a distinct colour with a name label.
-* Real-time co-editing: when two or more people open the same note, editing becomes character by character in real time, with correct remote cursors based on CRDT relative positions. It starts and stops automatically as people join and leave the note.
-* Real-time co-editing of Excalidraw drawings, if the Excalidraw plugin is installed. Two people can draw on the same canvas at once and see each other's pointers and selections on it.
-
-Presence and cursors are exchanged as metadata and never touch your files. During co-editing the note is edited through a shared CRDT (Yjs), so the plugin runs alongside a file-sync plugin (Self-hosted LiveSync, Syncthing, Git), which keeps the note stored and backed up as usual.
+* **Vault synchronisation.** All notes and attachments are distributed through the server. A note
+  is downloaded when you open it; until then it exists locally as a placeholder and the file
+  explorer shows a cloud symbol next to it, the way OneDrive marks online-only files.
+* **Who is online.** A status bar item with the number of connected people, and a sidebar panel
+  listing everyone grouped by the note they are in. Clicking a note opens it.
+* **Live cursors.** Cursors and selections of the other people inside the note you have open, each
+  in its own colour with a name label.
+* **Real-time co-editing.** As soon as two people have the same note open, editing goes character
+  by character through a shared CRDT (Yjs). It starts and stops on its own as people join and
+  leave the note. Excalidraw drawings work the same way if the Excalidraw plugin is installed.
+* **Author highlighting.** Colours each passage of the current note by who wrote it; hovering shows
+  the name and the time.
+* **A connection is required to write.** While the server is unreachable, note editing is blocked
+  and a banner says so. This is deliberate: without it, offline edits would have to be merged
+  later, which is where text gets lost.
+* **One version for everyone.** The server publishes the minimum client version. An older client
+  locks itself, offers a one-click update that it fetches from the server, and reloads Obsidian.
+* **Problem reports.** A button in the sidebar sends a short description to the server log.
 
 ### Excalidraw drawings
 
-A drawing is not shared as text. The body of an `.excalidraw.md` file is one machine-generated, usually LZ-compressed data block; merging that as text does not degrade a drawing, it destroys it, and replacing the whole file on every change means whoever saves last wins and the other person's strokes are gone.
+A drawing is not shared as text. The body of an `.excalidraw.md` file is a single machine-generated
+data block, usually LZ-compressed, so merging it line by line would wreck the drawing, and
+replacing the whole file on every change would mean the last save wins and everyone else's strokes
+are gone.
 
-Instead the drawing's *scene* is shared, one entry per element, in a room of its own (`excal:<path>`, separate from the note's text room). Excalidraw elements carry their own version metadata, so each element is resolved individually: the higher version wins and ties are broken deterministically, which is the same rule Excalidraw itself uses for collaboration. The practical result is that two people drawing different shapes never conflict, two people moving the same shape converge on one of the two movements rather than an average of both, and a deletion travels as a tombstone so it cannot be undone by a peer that still has the shape.
+Instead the drawing's scene is shared element by element in a room of its own (`excal:<path>`,
+separate from the note's text room). Excalidraw elements carry version metadata, so every element
+is resolved on its own: higher version wins, ties are broken deterministically. That is the rule
+Excalidraw uses for its own collaboration. Two people drawing different shapes never collide, two
+people moving the same shape end up on one of the two movements instead of an average, and a
+deletion travels as a tombstone so a peer that still has the shape cannot resurrect it.
 
-Three details matter in practice. Shapes are shared while they are still being drawn, about twenty times a second, so a stroke grows on the other screen as it is drawn rather than appearing when the pointer is released; a shape someone abandons mid-gesture is retracted again, so it does not linger on everyone else's canvas. An element the local user is dragging, resizing or typing into is never overwritten from the network, so nothing jumps out from under the pointer. And incoming changes are applied without touching the local selection, viewport or undo history, so a colleague's edit never scrolls your canvas or lands in your undo stack.
+Shapes are published about twenty times a second while they are being drawn, so a stroke grows on
+the other screen instead of appearing when the pointer is released; a shape abandoned mid-gesture
+is retracted again. An element that the local user is dragging, resizing or typing into is never
+overwritten from the network. Incoming changes do not touch the local selection, viewport or undo
+history.
 
-Remote pointers and selections are rendered through Excalidraw's own collaboration display, so they look the way they do on excalidraw.com.
+Known limits: drawings get no author highlighting (that is built on shared text); with several
+drawings open side by side, only the one in front is co-edited; and an element deleted while
+disconnected can come back once when the connection returns.
 
-Limitations worth knowing: drawings get no author highlighting or history view (those are built on shared text); if several drawings are open side by side, only the one in front is co-edited; and because editing is not locked on the canvas the way it is in a note, an element deleted while disconnected can come back once when the connection returns.
+## Server
 
-## How it works
+The plugin needs two things behind one hostname:
 
-Each client connects to a shared Yjs relay (y-websocket) and publishes its awareness state, which consists of name, colour, active file, and cursor position. Every other client receives this state and renders the roster and the remote cursors. The relay only forwards messages and stores nothing between sessions: for presence it carries awareness, and for a note being co-edited it carries that note's shared text while the session lasts. Because you host the relay yourself, all data stays within your own infrastructure.
+* the **presence relay**, a small Node service based on `y-websocket` that keeps every room on disk
+  (`y-leveldb`), validates each incoming connection against CouchDB, and writes an append-only
+  change log for the author highlighting;
+* a **CouchDB** instance, which holds the accounts (`_users`), the display names (`ksk_profiles`),
+  the change log (`ksk_changelog`), binary attachments as content-addressed documents
+  (`ksk_blobs`), the required client version (`ksk_config/client`) and the plugin files the
+  self-update serves (`ksk_plugin/current`).
 
-## Requirements
-
-Live Presence requires a self-hosted Yjs relay, the standard @y/websocket-server. A minimal Docker configuration is:
+The relay source is in `presence-server/` of the deployment repository. A `docker compose` service
+for it looks like this:
 
 ```yaml
 services:
   presence:
-    image: node:22-alpine
-    command: npx -y @y/websocket-server
+    build: ./presence-server
+    restart: unless-stopped
     environment:
-      - HOST=0.0.0.0
-      - PORT=1234
+      - COUCHDB_URL=http://couchdb:5984
+      - YJS_DATA_DIR=/data/yjs
+      - COUCHDB_USER=${COUCHDB_USER}
+      - COUCHDB_PASSWORD=${COUCHDB_PASSWORD}
+    volumes:
+      - ./presence-server/data:/data/yjs
     ports:
       - "127.0.0.1:1234:1234"
-    restart: unless-stopped
 ```
 
-Publish the relay over TLS so that the plugin can connect via wss. An example using Caddy:
+Put both behind TLS so the plugin can use `wss://`. With Caddy, the relay goes under `/presence/`
+and everything else to CouchDB:
 
 ```
 your.host.example {
+    tls /etc/caddy/certs/fullchain.pem /etc/caddy/certs/server.key
+
     handle_path /presence/* {
         reverse_proxy 127.0.0.1:1234
+    }
+    handle {
+        reverse_proxy 127.0.0.1:5984
     }
 }
 ```
 
-The resulting server URL for the plugin is `wss://your.host.example/presence`.
+The server URL for the plugin is then `wss://your.host.example/presence`.
 
-Keep the relay reachable only from a trusted network, for example a LAN, VPN, or campus network protected by a firewall. The relay itself has no authentication; the network boundary provides access control.
+Every WebSocket connection is rejected unless the account it sends is valid, so the relay is not
+open to whoever reaches it. Keeping it inside a trusted network anyway (LAN, VPN, campus network
+behind a firewall) is still the sensible thing to do.
+
+Besides the WebSocket, the relay answers `GET /version` (minimum and latest client version),
+`GET /plugin/<file>` (the plugin files for the self-update), `GET /checkuser?name=…` (whether an
+account exists, so the login test can tell a wrong user from a wrong password), `POST /log`
+(problem reports) and `GET /healthz`.
 
 ## Installation
 
-Live Presence is not available in the community plugin store. It can be installed with BRAT (recommended) or manually.
+Live Presence is not in the community plugin store. Install it with BRAT or by hand; after that it
+updates itself from the server.
 
-Using BRAT:
+With BRAT:
 
 1. Install and enable "Obsidian42 - BRAT" from the community plugin store.
 2. Run the command "BRAT: Add a beta plugin for testing".
 3. Enter the repository `Alfonsinjo/obsidian-live-presence`.
 4. Enable Live Presence under Settings, Community plugins.
 
-Manually:
+By hand:
 
-1. Download `main.js`, `manifest.json`, and `styles.css` from the latest release.
+1. Download `main.js`, `manifest.json` and `styles.css` from the latest release.
 2. Copy them into `<your-vault>/.obsidian/plugins/live-presence/`.
 3. Reload Obsidian and enable Live Presence.
 
@@ -96,32 +138,34 @@ Manually:
 
 Under Settings, Live Presence:
 
-* Display name: full name, shown in the roster and next to your cursor.
-* Colour: an optional fixed colour (hsl or hex). If left empty, a colour is derived from the name.
-* Server URL: the address of your relay, for example `wss://your.host.example/presence`, without a trailing slash.
-* Login user / Login password: optional credentials. If your relay requires authentication, enter them here; they are sent to the relay when connecting.
+* **Server URL**: `wss://your.host.example/presence`, without a trailing slash.
+* **Login user** and **Login password**: the CouchDB account. The plugin sends them as query
+  parameters when it opens the connection, and uses them for the CouchDB databases listed above.
+* **Display name**: asked once on the first connection and stored on the server with the account,
+  so it follows you to another machine. The colour is derived from the name.
+* **Real-time co-editing**: on by default. Turning it off leaves presence and cursors working.
 
-The plugin does not connect until a server URL has been entered.
-
-## Authentication (optional)
-
-The plain relay accepts any connection reachable on the network. If you want only known accounts to connect, run a relay that validates the credentials the plugin sends (query parameters `u` and `p`) before accepting the WebSocket upgrade. A common approach is to validate them against an existing account store; for example, against a CouchDB instance using `POST /_session`, which pairs naturally with the Self-hosted LiveSync backend so one account works for both. Users then enter that account under Login user / Login password.
+Then press "Anmelden / Verbindung testen". It checks URL, account and password separately and says
+which of them is wrong. On success it asks once more before the vault is reconciled with the
+server, because that step downloads content and can overwrite local files.
 
 ## Building from source
 
-Docker is required. Node.js does not need to be installed on the host.
+Docker is required, Node.js on the host is not.
 
 ```bash
 bash build.sh
 ```
 
-This produces `main.js`. For a release, attach `main.js`, `manifest.json`, and `styles.css` as assets.
+This type-checks the sources and writes `main.js`. A release consists of `main.js`,
+`manifest.json` and `styles.css`.
 
-## Compatibility
+## Notes on compatibility
 
-* Obsidian 1.5.0 or newer, desktop only. The plugin uses the CodeMirror 6 editor API and is therefore not available on mobile.
-* Runs alongside file-sync plugins such as Self-hosted LiveSync, Syncthing, or Git.
+* Desktop only. The plugin uses the CodeMirror 6 editor API, which Obsidian mobile does not expose.
+* Do not run a second sync plugin on the same vault. Two systems writing the same files will
+  produce conflicts that neither of them can resolve.
 
-## License
+## Licence
 
-MIT. See the LICENSE file.
+MIT, see the LICENSE file.

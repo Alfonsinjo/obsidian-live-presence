@@ -5,13 +5,11 @@ export interface LivePresenceSettings {
   userName: string;
   // Fixed colour (hex/hsl); empty means derive it from the name.
   color: string;
-  // CouchDB login (same account as LiveSync). Required to connect.
+  // Server account (validated by the relay against CouchDB). Required to connect.
   authUser: string;
   authPass: string;
-  // Real-time co-editing (shared text). Off by default; presence and cursors work without it.
+  // Real-time co-editing (shared text). On by default; presence and cursors work without it.
   enableCoedit: boolean;
-  // Experimental: distribute the whole vault through the relay (replacement for external sync).
-  enableVaultSync: boolean;
 }
 
 export const DEFAULT_SETTINGS: LivePresenceSettings = {
@@ -21,7 +19,6 @@ export const DEFAULT_SETTINGS: LivePresenceSettings = {
   authUser: "",
   authPass: "",
   enableCoedit: true,
-  enableVaultSync: false,
 };
 
 // Cursor/selection as absolute character offsets.

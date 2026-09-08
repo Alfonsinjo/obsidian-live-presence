@@ -21,7 +21,8 @@ export class LivePresenceSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Anzeigename")
       .setDesc(
-        "Ihr Vor- und Nachname. Wird beim ersten Verbinden abgefragt und im Konto gespeichert; erscheint im Roster und am Cursor.",
+        "Ihr Vor- und Nachname. Wird beim ersten Verbinden abgefragt und auf dem Server zu Ihrem Konto " +
+          "gespeichert. Die anderen sehen ihn in der Seitenleiste und an Ihrem Cursor.",
       )
       .addText((t) => {
         t.setValue(this.plugin.settings.userName || "").setDisabled(true);
@@ -45,7 +46,9 @@ export class LivePresenceSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Server-URL")
-      .setDesc("WebSocket-Basis des Presence-Servers (ohne Schrägstrich am Ende).")
+      .setDesc(
+        "Adresse Ihres Servers, z. B. wss://server.example/presence (ohne Schrägstrich am Ende).",
+      )
       .addText((t) =>
         t
           .setPlaceholder("wss://…/presence")
@@ -58,7 +61,7 @@ export class LivePresenceSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Login-Benutzer")
-      .setDesc("Ihr Server-Benutzer (dasselbe Konto wie bei LiveSync).")
+      .setDesc("Ihr Konto auf dem Server.")
       .addText((t) =>
         t
           .setPlaceholder("benutzername")
@@ -97,8 +100,9 @@ export class LivePresenceSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Co-Editing aktivieren")
       .setDesc(
-        "Bearbeitet dieselbe Notiz in Echtzeit, sobald zwei oder mehr Personen sie geöffnet haben " +
-          "(auch Excalidraw-Zeichnungen). Anwesenheit und Cursor funktionieren unabhängig davon.",
+        "Sobald zwei oder mehr Personen dieselbe Notiz geöffnet haben, wird sie gemeinsam bearbeitet, " +
+          "Zeichen für Zeichen – Excalidraw-Zeichnungen ebenso. Wer online ist und wo die Cursor " +
+          "stehen, sehen Sie auch ohne diese Option.",
       )
       .addToggle((tg) =>
         tg.setValue(this.plugin.settings.enableCoedit).onChange(async (v) => {
@@ -108,28 +112,19 @@ export class LivePresenceSettingTab extends PluginSettingTab {
         }),
       );
 
-    new Setting(containerEl).setName("Vault-Synchronisation (experimentell)").setHeading();
+    new Setting(containerEl).setName("Vault-Synchronisation").setHeading();
 
-    new Setting(containerEl)
-      .setName("Ganzen Vault über den Relay synchronisieren")
-      .setDesc(
-        "Verteilt den Vault über den eigenen Server. Notizen werden bei Bedarf geladen " +
-          "(zunächst Platzhalter, Inhalt beim Öffnen). Experimentell; nur mit Testdaten. " +
-          "Nach dem Umschalten Obsidian neu laden.",
-      )
-      .addToggle((tg) =>
-        tg.setValue(this.plugin.settings.enableVaultSync).onChange(async (v) => {
-          this.plugin.settings.enableVaultSync = v;
-          await this.plugin.saveSettings();
-          this.plugin.reconnect();
-        }),
-      );
+    new Setting(containerEl).setDesc(
+      "Der ganze Vault läuft über diesen Server – ein zusätzliches Sync-Plugin brauchen Sie nicht. " +
+        "Eine Notiz wird geladen, wenn Sie sie öffnen; bis dahin steht in der Dateiliste ein " +
+        "Wolkensymbol davor.",
+    );
 
     new Setting(containerEl)
       .setName("Anmelden")
       .setDesc(
-        "Prüft die Zugangsdaten und meldet genau, was nicht stimmt. " +
-          "Bei aktiver Vault-Synchronisation folgt eine Sicherheitsabfrage.",
+        "Prüft Server-URL und Zugangsdaten und sagt, was nicht stimmt. Vor dem Abgleich mit dem " +
+          "Server kommt noch eine Rückfrage.",
       )
       .addButton((b) =>
         b
@@ -152,11 +147,7 @@ export class LivePresenceSettingTab extends PluginSettingTab {
             }
             const n = new Notice("Live Presence: Zugangsdaten korrekt.");
             n.noticeEl.addClass("lp-notice-success");
-            if (this.plugin.settings.enableVaultSync) {
-              new ConnectModal(this.app, () => this.plugin.reconnect()).open();
-            } else {
-              this.plugin.reconnect();
-            }
+            new ConnectModal(this.app, () => this.plugin.reconnect()).open();
           }),
       );
   }

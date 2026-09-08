@@ -125,7 +125,7 @@ export class RosterView extends ItemView {
     if (!path) {
       root.createDiv({
         cls: "lp-roster-empty",
-        text: "Es ist derzeit keine Notiz geöffnet.",
+        text: "Keine Notiz geöffnet.",
       });
       return;
     }
@@ -136,8 +136,8 @@ export class RosterView extends ItemView {
     root.createDiv({
       cls: "lp-ver-hint",
       text:
-        "Die farbliche Markierung kennzeichnet, welche Textpassagen von welcher Person verfasst wurden. " +
-        "Bewegen Sie den Zeiger über eine Passage, um Verfasser und Zeitpunkt anzuzeigen.",
+        "Farbig hinterlegt, wer welchen Abschnitt geschrieben hat. Zeiger darüber halten zeigt " +
+        "Name und Zeitpunkt.",
     });
 
     const info = this.cb.overlayInfo();

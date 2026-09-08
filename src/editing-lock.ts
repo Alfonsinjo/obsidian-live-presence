@@ -34,8 +34,8 @@ export function editingLockExtension(): Extension {
     if (now - lastNotice > 4000) {
       lastNotice = now;
       new Notice(
-        "Offline: Bearbeitung gesperrt. Zum Schreiben ist eine Verbindung erforderlich. " +
-          "Bitte notieren Sie Ihren Text vorerst extern und fügen Sie ihn später ein.",
+        "Keine Verbindung zum Server – Bearbeitung gesperrt. Ohne Verbindung ginge Ihr Text " +
+          "verloren. Schreiben Sie ihn vorerst außerhalb von Obsidian.",
         4000,
       );
     }

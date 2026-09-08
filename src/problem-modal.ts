@@ -16,11 +16,11 @@ export class ProblemModal extends Modal {
     const { contentEl, titleEl } = this;
     titleEl.setText("Problem melden");
     contentEl.createEl("p", {
-      text: "Beschreiben Sie das Problem kurz. Die Meldung wird an den Entwickler übermittelt.",
+      text: "Beschreiben Sie kurz, was passiert ist. Die Meldung geht an den Entwickler.",
     });
     const ta = contentEl.createEl("textarea", { cls: "lp-conflict-text" });
     ta.rows = 8;
-    ta.placeholder = "Was ist passiert? Was war zu erwarten?";
+    ta.placeholder = "Was ist passiert? Was hätten Sie erwartet?";
 
     const actions = contentEl.createDiv({ cls: "lp-conflict-actions" });
     actions.createEl("button", { text: "Senden", cls: "mod-cta" }).onClickEvent(() => this.send(ta.value));
@@ -36,7 +36,7 @@ export class ProblemModal extends Modal {
       return;
     }
     logProblem("warn", `Problemmeldung: ${body}`, { reporter: this.reporter, version: this.version });
-    new Notice("Vielen Dank. Ihre Meldung wurde übermittelt.");
+    new Notice("Vielen Dank, die Meldung ist angekommen.");
     this.close();
   }
 

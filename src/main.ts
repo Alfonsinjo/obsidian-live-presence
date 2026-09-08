@@ -136,12 +136,12 @@ export default class LivePresencePlugin extends Plugin {
     this.addRibbonIcon("users", "Live Presence: Wer ist da?", () => this.activateRoster());
     this.addCommand({
       id: "lp-presence-open-roster",
-      name: "Roster öffnen (wer ist gerade im Vault)",
+      name: "Seitenleiste öffnen (wer ist gerade im Vault)",
       callback: () => this.activateRoster(),
     });
     this.addCommand({
       id: "lp-toggle-authors",
-      name: "Autoren im Text ein-/ausblenden (wer hat was geschrieben)",
+      name: "Autorenkennzeichnung im Text ein- und ausblenden",
       callback: () => void this.toggleAuthorsOverlay(),
     });
 
@@ -403,18 +403,15 @@ export default class LivePresencePlugin extends Plugin {
     {
       // Locked until we are actually connected: a connection is always required.
       this.setOffline(true);
-      new Notice("Live Presence: Versuche Verbindung zur Datenbank aufzubauen …");
+      new Notice("Live Presence: Verbinde mit dem Server …");
       let settled = false;
       const succeed = () => {
         if (settled) return;
         settled = true;
         window.clearTimeout(timer);
         this.setOffline(false);
-        logProblem("info", "verbunden", {
-          coedit: this.settings.enableCoedit,
-          vaultSync: this.settings.enableVaultSync,
-        });
-        const n = new Notice("Erfolgreich mit Live Presence verbunden");
+        logProblem("info", "verbunden", { coedit: this.settings.enableCoedit });
+        const n = new Notice("Live Presence: Verbindung steht.");
         n.noticeEl.addClass("lp-notice-success");
       };
       const fail = (msg: string) => {
@@ -450,11 +447,12 @@ export default class LivePresencePlugin extends Plugin {
     this.restartVaultSync();
   }
 
-  // Start (or restart) whole-vault synchronisation when it is enabled.
+  // Start (or restart) whole-vault synchronisation. The plugin is the vault's
+  // sync path, so this is not optional - it only waits for a configured server.
   private restartVaultSync(): void {
     this.vaultSync?.stop();
     this.vaultSync = null;
-    if (!this.settings.enableVaultSync || !this.settings.serverUrl || !this.settings.authUser) return;
+    if (!this.settings.serverUrl || !this.settings.authUser) return;
     this.vaultSync = new VaultSync(
       this.app,
       this.settings.serverUrl,
@@ -486,8 +484,8 @@ export default class LivePresencePlugin extends Plugin {
       el.createSpan({ cls: "lp-offline-banner-dot", text: "●" });
       el.createSpan({
         text:
-          "Offline – Bearbeitung gesperrt. Änderungen werden nicht gespeichert. " +
-          "Bitte notieren Sie extern und fügen Sie den Text nach dem Wiederverbinden ein.",
+          "Keine Verbindung zum Server – Bearbeitung gesperrt. Schreiben Sie Ihren Text " +
+          "vorerst außerhalb von Obsidian und fügen Sie ihn ein, sobald die Verbindung steht.",
       });
       el.hide();
       this.offlineBanner = el;
@@ -684,10 +682,7 @@ export default class LivePresencePlugin extends Plugin {
     // before writing resumes. Announce each step via a toast.
     this.hasConnected = true;
     setEditingOnline(false);
-    this.verifyNotice = new Notice(
-      "Live Presence: Wieder verbunden. Gleiche das Dokument mit dem Server ab …",
-      0,
-    );
+    this.verifyNotice = new Notice("Live Presence: Wieder verbunden. Gleiche die Notiz ab …", 0);
     this.verifyTimer = window.setTimeout(() => {
       this.verifyTimer = null;
       this.verifyNotice?.hide();
@@ -797,7 +792,7 @@ export default class LivePresencePlugin extends Plugin {
       await saveProfileName(serverUrl, authUser, authPass, name);
     }
     this.presence?.setUser(this.effectiveUser());
-    new Notice(`Live Presence: Name gesetzt: ${name}`);
+    new Notice(`Live Presence: Name geändert in „${name}“.`);
   }
 
   // Track the active file + editor and publish them.
@@ -1064,7 +1059,7 @@ export default class LivePresencePlugin extends Plugin {
     if (!cache || cache.path !== path || !cm) return;
     const built = this.buildBlameOverlay(cache.runs, cm.state.doc.length, dayFilter);
     if (!built) {
-      if (!silent) new Notice("Live Presence: Verlauf noch nicht synchron – kurz warten und erneut versuchen.");
+      if (!silent) new Notice("Live Presence: Verlauf noch nicht vollständig – kurz warten und erneut versuchen.");
       return;
     }
     const title = `Änderungen am ${new Date(dayFilter).toLocaleDateString()}`;

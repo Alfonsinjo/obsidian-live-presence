@@ -98,7 +98,7 @@ export class CollabBinding {
           wsconnected: provider.wsconnected,
           online: navigator.onLine,
         });
-        new Notice("Live Presence: Co-Editing konnte nicht verbinden (Zeitüberschreitung).");
+        new Notice("Live Presence: Gemeinsames Bearbeiten nicht möglich – keine Antwort vom Server.");
         await this.disengage();
         return;
       }
@@ -156,7 +156,7 @@ export class CollabBinding {
       // Yjs resynchronises cleanly on its own when the socket returns.
     } catch (err) {
       logProblem("error", "Co-Editing Fehler", { path, err: String(err) });
-      new Notice("Live Presence: Co-Editing-Fehler.");
+      new Notice("Live Presence: Gemeinsames Bearbeiten dieser Notiz ist fehlgeschlagen.");
       await this.disengage();
     }
   }

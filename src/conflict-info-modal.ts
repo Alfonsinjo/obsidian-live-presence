@@ -60,8 +60,8 @@ export class ConflictInfoModal extends Modal {
 
     contentEl.createEl("p", {
       text:
-        `Ihre lokale Fassung von „${name}" weicht vom Server ab. Es gilt immer die ` +
-        "Server-Version. Nachfolgend die Unterschiede.",
+        `Ihre lokale Fassung von „${name}“ weicht von der auf dem Server ab. Es gilt immer die ` +
+        "Version vom Server. Hier die Unterschiede:",
     });
 
     const { localOnly, remoteOnly } = lineDiff(this.localText, this.remoteText);
@@ -105,8 +105,8 @@ export class ConflictInfoModal extends Modal {
     contentEl.createEl("p", {
       cls: "lp-conflict-hint",
       text:
-        "Zum Sichern kopieren Sie Ihren Text und schließen Obsidian, bevor Sie fortfahren. " +
-        "Andernfalls wird die Server-Version übernommen.",
+        "Wenn Sie Ihre Fassung behalten wollen, kopieren Sie den Text jetzt und schließen " +
+        "Obsidian. Sonst wird die Version vom Server übernommen.",
     });
   }
 

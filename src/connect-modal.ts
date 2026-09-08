@@ -18,13 +18,13 @@ export class ConnectModal extends Modal {
     titleEl.setText("Vault mit dem Server abgleichen");
     contentEl.createEl("p", {
       text:
-        "Der aktuell gewählte Vault wird mit dem Server abgeglichen. Dabei werden Inhalte " +
-        "heruntergeladen und lokale Dateien können überschrieben werden.",
+        "Der geöffnete Vault wird mit dem Server abgeglichen. Dabei werden Inhalte vom Server " +
+        "geladen, und lokale Dateien können dabei überschrieben werden.",
     });
     contentEl.createEl("p", {
       text:
-        "Bitte prüfen Sie, dass der richtige Vault gewählt ist, und sichern Sie wichtige lokale " +
-        "Inhalte, die noch nicht auf dem Server sind.",
+        "Prüfen Sie deshalb, ob der richtige Vault offen ist. Was hier lokal liegt und noch " +
+        "nicht auf dem Server ist, sichern Sie besser vorher.",
     });
 
     const actions = contentEl.createDiv({ cls: "lp-conflict-actions" });
